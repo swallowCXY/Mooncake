@@ -686,7 +686,7 @@ void MooncakeBackend::stopP2PWorker() {
 
 void MooncakeBackend::p2PSendWorkerThread() {
     while (p2pSendWorkerRunning_.load()) {
-        // First, poll pending transfers to complete any finished operations
+        // Poll pending transfers frequently to complete finished operations
         pollPendingSendTransfers();
         
         // Then, process new operations from the queue
@@ -694,7 +694,8 @@ void MooncakeBackend::p2PSendWorkerThread() {
         bool hasOp = false;
         {
             std::unique_lock<std::mutex> lock(p2pSendQueueMutex_);
-            p2pSendQueueCv_.wait_for(lock, std::chrono::microseconds(100), [this] {
+            // Use shorter timeout to poll transfers more frequently
+            p2pSendQueueCv_.wait_for(lock, std::chrono::microseconds(50), [this] {
                 return !p2pSendQueue_.empty() || !p2pSendWorkerRunning_.load();
             });
             
@@ -786,6 +787,7 @@ void MooncakeBackend::processSendOp(const P2POp& op) {
     meta_.store->set(slotRequestKey, c10::str(numSlotsNeeded, "_", numBytes));
 
     // Wait for receiver to allocate and publish the slot.
+    // Check store less frequently to avoid overhead
     const std::string slotAllocKey =
         makeP2PSlotKey(meta_.backendIndex, rank_, dstRank, tag, seq);
     std::vector<std::string> keys = {slotAllocKey};
@@ -814,9 +816,8 @@ void MooncakeBackend::processSendOp(const P2POp& op) {
                 }
             }
         }
-        std::this_thread::sleep_for(std::chrono::microseconds(10));
-        // Poll pending transfers every iteration for better responsiveness
-        yieldForPendingTransfers();
+        // Check store less frequently (every 100us) since store operations are slower
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
 
     const std::string ctrlKey =
@@ -868,53 +869,6 @@ void MooncakeBackend::processSendOp(const P2POp& op) {
     {
         std::lock_guard<std::mutex> lock(pendingSendOpsMutex_);
         pendingSendOps_.push_back(pendingOp);
-    }
-}
-
-void MooncakeBackend::yieldForPendingTransfers() {
-    // Try to acquire lock without blocking - if we can't get it immediately,
-    // it means pollPendingSendTransfers is already running, so we skip
-    std::unique_lock<std::mutex> lock(pendingSendOpsMutex_, std::try_to_lock);
-    if (lock.owns_lock() && !pendingSendOps_.empty()) {
-        // Process a limited number of pending transfers to avoid blocking too long
-        auto it = pendingSendOps_.begin();
-        int processed = 0;
-        const int maxProcessPerYield = 3;  // Limit processing per yield
-        
-        while (it != pendingSendOps_.end() && processed < maxProcessPerYield) {
-            TransferStatus status;
-            auto s = meta_.engine->getTransferStatus(it->batchID, 0, status);
-            
-            if (!s.ok()) {
-                ++it;
-                continue;
-            }
-            
-            if (status.s == TransferStatusEnum::COMPLETED) {
-                try {
-                    meta_.store->set(it->ctrlKey, c10::str(it->baseSlot, "_", it->allocatedSlots, "_",
-                                                           it->numBytes));
-                    meta_.engine->freeBatchID(it->batchID);
-                    it->op.completed->store(true, std::memory_order_release);
-                } catch (const std::exception& e) {
-                    *it->op.errorMsg = e.what();
-                    it->op.completed->store(true, std::memory_order_release);
-                }
-                it = pendingSendOps_.erase(it);
-                ++processed;
-            } else if (status.s == TransferStatusEnum::FAILED ||
-                      status.s == TransferStatusEnum::CANCELED ||
-                      status.s == TransferStatusEnum::TIMEOUT) {
-                *it->op.errorMsg = c10::str("P2P send transfer failed with status: ",
-                                           static_cast<int>(status.s));
-                it->op.completed->store(true, std::memory_order_release);
-                meta_.engine->freeBatchID(it->batchID);
-                it = pendingSendOps_.erase(it);
-                ++processed;
-            } else {
-                ++it;
-            }
-        }
     }
 }
 
@@ -981,13 +935,13 @@ void MooncakeBackend::processRecvOp(const P2POp& op) {
     int baseSlot = static_cast<int>(seq % kP2PNumSlots);
     
     // Wait for slot request from sender.
+    // Check store less frequently to avoid overhead
     const std::string slotRequestKey =
         makeP2PSlotKey(meta_.backendIndex, srcRank, rank_, tag, seq);
     std::vector<std::string> keys = {slotRequestKey};
     while (!meta_.store->check(keys)) {
-        std::this_thread::sleep_for(std::chrono::microseconds(10));
-        // Poll pending transfers every iteration for better responsiveness
-        yieldForPendingTransfers();
+        // Check store less frequently (every 100us) since store operations are slower
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
     
     // Parse slot request: "numSlotsNeeded_numBytes"
@@ -1015,9 +969,8 @@ void MooncakeBackend::processRecvOp(const P2POp& op) {
                                                        rank_, tag, waitSeq);
             std::vector<std::string> doneKeys = {doneKey};
             while (!meta_.store->check(doneKeys)) {
-                std::this_thread::sleep_for(std::chrono::microseconds(10));
-                // Poll pending transfers every iteration for better responsiveness
-                yieldForPendingTransfers();
+                // Check store less frequently (every 100us) since store operations are slower
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
             }
             meta_.store->get(doneKey);
             ++meta_.p2pRecvLowestInFlight[srcRank];
@@ -1030,9 +983,8 @@ void MooncakeBackend::processRecvOp(const P2POp& op) {
                                                        rank_, tag, waitSeq);
             std::vector<std::string> doneKeys = {doneKey};
             while (!meta_.store->check(doneKeys)) {
-                std::this_thread::sleep_for(std::chrono::microseconds(10));
-                // Poll pending transfers every iteration for better responsiveness
-                yieldForPendingTransfers();
+                // Check store less frequently (every 100us) since store operations are slower
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
             }
             meta_.store->get(doneKey);
             ++meta_.p2pRecvLowestInFlight[srcRank];
@@ -1046,11 +998,11 @@ void MooncakeBackend::processRecvOp(const P2POp& op) {
         makeP2PCtrlKey(meta_.backendIndex, srcRank, rank_, tag, seq);
     
     // Wait for sender to complete data transfer and publish control message.
+    // Check store less frequently to avoid overhead
     std::vector<std::string> ctrlKeys = {ctrlKey};
     while (!meta_.store->check(ctrlKeys)) {
-        std::this_thread::sleep_for(std::chrono::microseconds(10));
-        // Poll pending transfers every iteration for better responsiveness
-        yieldForPendingTransfers();
+        // Check store less frequently (every 100us) since store operations are slower
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
     auto ctrlValue = meta_.store->get(ctrlKey);
     std::string ctrlStr(ctrlValue.begin(), ctrlValue.end());
