@@ -101,6 +101,16 @@ class MooncakeBackend final : public ::c10d::Backend {
         std::shared_ptr<std::string> errorMsg;
     };
     
+    // Pending send operation state
+    struct PendingSendOp {
+        P2POp op;
+        BatchID batchID;
+        int baseSlot;
+        int allocatedSlots;
+        size_t numBytes;
+        std::string ctrlKey;
+    };
+    
     // P2P worker thread methods
     void startP2PWorker();
     void stopP2PWorker();
@@ -108,6 +118,7 @@ class MooncakeBackend final : public ::c10d::Backend {
     void p2PRecvWorkerThread();
     void processSendOp(const P2POp& op);
     void processRecvOp(const P2POp& op);
+    void pollPendingSendTransfers();
     
     static TransferEngine engine_;
     static Transport* transport_;
@@ -127,6 +138,10 @@ class MooncakeBackend final : public ::c10d::Backend {
     std::condition_variable p2pSendQueueCv_;
     std::atomic<bool> p2pSendWorkerRunning_{false};
     std::thread p2pSendWorkerThread_;
+    
+    // Pending send operations waiting for transfer completion
+    std::vector<PendingSendOp> pendingSendOps_;
+    std::mutex pendingSendOpsMutex_;
     
     std::queue<P2POp> p2pRecvQueue_;
     std::mutex p2pRecvQueueMutex_;

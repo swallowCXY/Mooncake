@@ -686,32 +686,52 @@ void MooncakeBackend::stopP2PWorker() {
 
 void MooncakeBackend::p2PSendWorkerThread() {
     while (p2pSendWorkerRunning_.load()) {
+        // First, poll pending transfers to complete any finished operations
+        pollPendingSendTransfers();
+        
+        // Then, process new operations from the queue
         P2POp op;
+        bool hasOp = false;
         {
             std::unique_lock<std::mutex> lock(p2pSendQueueMutex_);
-            p2pSendQueueCv_.wait(lock, [this] {
+            p2pSendQueueCv_.wait_for(lock, std::chrono::microseconds(100), [this] {
                 return !p2pSendQueue_.empty() || !p2pSendWorkerRunning_.load();
             });
             
             if (!p2pSendWorkerRunning_.load() && p2pSendQueue_.empty()) {
+                // Check pending ops one more time before exiting
+                pollPendingSendTransfers();
                 break;
             }
             
-            if (p2pSendQueue_.empty()) {
-                continue;
+            if (!p2pSendQueue_.empty()) {
+                op = p2pSendQueue_.front();
+                p2pSendQueue_.pop();
+                hasOp = true;
             }
-            
-            op = p2pSendQueue_.front();
-            p2pSendQueue_.pop();
         }
         
-        try {
-            processSendOp(op);
-            op.completed->store(true, std::memory_order_release);
-        } catch (const std::exception& e) {
-            *op.errorMsg = e.what();
-            op.completed->store(true, std::memory_order_release);
+        if (hasOp) {
+            try {
+                processSendOp(op);
+            } catch (const std::exception& e) {
+                *op.errorMsg = e.what();
+                op.completed->store(true, std::memory_order_release);
+            }
         }
+    }
+    
+    // Complete any remaining pending operations before exiting
+    // Keep polling until all pending operations are completed
+    while (true) {
+        {
+            std::lock_guard<std::mutex> lock(pendingSendOpsMutex_);
+            if (pendingSendOps_.empty()) {
+                break;
+            }
+        }
+        pollPendingSendTransfers();
+        std::this_thread::sleep_for(std::chrono::microseconds(10));
     }
 }
 
@@ -831,21 +851,71 @@ void MooncakeBackend::processSendOp(const P2POp& op) {
         .length = numBytes,
     });
     auto batchID = meta_.engine->allocateBatchID(entries.size());
-    meta_.engine->submitTransfer(batchID, entries);
+    auto status = meta_.engine->submitTransfer(batchID, entries);
+    TORCH_CHECK(status.ok(), "P2P send: failed to submit transfer: ", status.ToString());
 
-    TransferStatus status;
-    while (true) {
-        meta_.engine->getTransferStatus(batchID, 0, status);
-        if (status.s == TransferStatusEnum::COMPLETED) {
-            break;
-        }
-        TORCH_CHECK(status.s != TransferStatusEnum::FAILED,
-                    "P2P send transfer failed.");
+    // Instead of waiting here, add to pending list for async polling
+    PendingSendOp pendingOp;
+    pendingOp.op = op;
+    pendingOp.batchID = batchID;
+    pendingOp.baseSlot = baseSlot;
+    pendingOp.allocatedSlots = allocatedSlots;
+    pendingOp.numBytes = numBytes;
+    pendingOp.ctrlKey = ctrlKey;
+    
+    {
+        std::lock_guard<std::mutex> lock(pendingSendOpsMutex_);
+        pendingSendOps_.push_back(pendingOp);
     }
+}
 
-    // Publish control metadata after data is visible remotely.
-    meta_.store->set(ctrlKey, c10::str(baseSlot, "_", allocatedSlots, "_",
-                                       numBytes));
+void MooncakeBackend::pollPendingSendTransfers() {
+    std::lock_guard<std::mutex> lock(pendingSendOpsMutex_);
+    
+    auto it = pendingSendOps_.begin();
+    while (it != pendingSendOps_.end()) {
+        TransferStatus status;
+        auto s = meta_.engine->getTransferStatus(it->batchID, 0, status);
+        
+        if (!s.ok()) {
+            // Error checking status, keep in list and try again later
+            ++it;
+            continue;
+        }
+        
+        if (status.s == TransferStatusEnum::COMPLETED) {
+            // Transfer completed successfully
+            try {
+                // Publish control metadata after data is visible remotely.
+                meta_.store->set(it->ctrlKey, c10::str(it->baseSlot, "_", it->allocatedSlots, "_",
+                                                       it->numBytes));
+                
+                // Free the batch ID
+                meta_.engine->freeBatchID(it->batchID);
+                
+                // Mark operation as completed
+                it->op.completed->store(true, std::memory_order_release);
+            } catch (const std::exception& e) {
+                *it->op.errorMsg = e.what();
+                it->op.completed->store(true, std::memory_order_release);
+            }
+            
+            // Remove from pending list
+            it = pendingSendOps_.erase(it);
+        } else if (status.s == TransferStatusEnum::FAILED ||
+                   status.s == TransferStatusEnum::CANCELED ||
+                   status.s == TransferStatusEnum::TIMEOUT) {
+            // Transfer failed, canceled, or timed out
+            *it->op.errorMsg = c10::str("P2P send transfer failed with status: ",
+                                       static_cast<int>(status.s));
+            it->op.completed->store(true, std::memory_order_release);
+            meta_.engine->freeBatchID(it->batchID);
+            it = pendingSendOps_.erase(it);
+        } else {
+            // Still in progress (WAITING, PENDING, etc.), keep in list
+            ++it;
+        }
+    }
 }
 
 void MooncakeBackend::processRecvOp(const P2POp& op) {
