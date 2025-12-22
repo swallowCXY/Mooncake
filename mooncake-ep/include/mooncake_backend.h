@@ -119,6 +119,7 @@ class MooncakeBackend final : public ::c10d::Backend {
     void processSendOp(const P2POp& op);
     void processRecvOp(const P2POp& op);
     void pollPendingSendTransfers();
+    void yieldForPendingTransfers();  // Helper to poll pending transfers during blocking waits
     
     static TransferEngine engine_;
     static Transport* transport_;
