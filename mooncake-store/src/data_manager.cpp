@@ -117,7 +117,7 @@ tl::expected<void, ErrorCode> DataManager::ReadRemoteData(
         LOG(ERROR) << "ReadRemoteData: Failed to get data for key: " << key
                    << ", error: " << toString(handle_result.error());
         timer.LogResponse("error_code=", handle_result.error());
-        return tl::make_unexpected(handle_result.error());
+        return tl::make_unexpected(ErrorCode::OBJECT_NOT_FOUND);
     }
 
     auto handle = handle_result.value();
@@ -150,7 +150,7 @@ tl::expected<void, ErrorCode> DataManager::WriteRemoteData(
         LOG(ERROR) << "WriteRemoteData: Failed to allocate space for key: "
                    << key;
         timer.LogResponse("error_code=", handle_result.error());
-        return tl::make_unexpected(handle_result.error());
+        return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
     }
 
     auto handle = handle_result.value();
