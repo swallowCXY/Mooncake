@@ -47,8 +47,9 @@ PeerClient::PeerClient() {
         pool_conf.client_config.socket_config =
             coro_io::ib_socket_t::config_t{};
     }
-    client_pools_ = std::make_shared<coro_io::client_pools<coro_rpc::coro_rpc_client>>(
-        pool_conf);
+    client_pools_ =
+        std::make_shared<coro_io::client_pools<coro_rpc::coro_rpc_client>>(
+            pool_conf);
 }
 
 PeerClient::~PeerClient() = default;
