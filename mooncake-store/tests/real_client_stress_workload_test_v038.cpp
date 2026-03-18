@@ -2,41 +2,75 @@
 //
 // v0.3.8-compatible adaptation of real_client_stress_workload_test.cpp.
 //
-// Key API differences from pr-1631:
-//   ┌─────────────────┬──────────────────────────────────────────┬──────────────────────────────────────┐
-//   │ Feature         │ pr-1631                                  │ v0.3.8                               │
-//   ├─────────────────┼──────────────────────────────────────────┼──────────────────────────────────────┤
-//   │ Client init     │ ClientConfigBuilder + setup(config)       │ setup_real(flat params)              │
-//   │ Write API       │ put_from(key, buf, size, WriteConfig)     │ put_from(key, buf, size, ReplicateConfig) │
-//   │ Read API        │ get_into(key, buf, size, ReadRouteConfig) │ get_into(key, buf, size)             │
-//   │ Mode            │ p2p | centralized                        │ centralized only                     │
-//   │ Headers         │ client_config_builder.h, p2p_rpc_types.h │ real_client.h + replica.h (via it)   │
-//   └─────────────────┴──────────────────────────────────────────┴──────────────────────────────────────┘
+// Notes (API differences vs newer branches):
+// - Init: RealClient::setup_real(flat params) (no ClientConfigBuilder).
+// - Write: put_from(key, buf, size, ReplicateConfig).
+// - Read:  get_into(key, buf, size) (no ReadRouteConfig).
 //
-// Usage (two-node example):
-//   # Start master
-//   ./mooncake_master --deployment_mode=Centralization \
-//     --rpc_port=50051 --enable_http_metadata_server=true \
-//     --http_metadata_server_port=8080
+// Usage (example you actually run: master in container + 3 clients):
 //
-//   # Node 1 (preload + stress-read in same process)
-//   START_MS=$(date -d '+60 seconds' +%s%3N)
-//   ./real_client_stress_workload_test_v038 \
-//     --local_hostname=10.0.0.11:12345 \
-//     --master_address=10.0.0.1:50051 \
-//     --metadata_connection_string=http://10.0.0.1:8080 \
+//   # Start master (host network; adjust image/tag as needed)
+//   nerdctl --namespace k8s.io run -d --name mooncake-node-cxy380 --network host \
+//     --privileged \
+//     --device /dev/infiniband/uverbs0 \
+//     --device /dev/infiniband/uverbs1 \
+//     -v /sys/class/infiniband:/sys/class/infiniband:ro \
+//     -v /sys/class/infiniband_verbs:/sys/class/infiniband_verbs:ro \
+//     localhost/mooncake-p2p-test:v380 \
+//     /vllm-workspace/Mooncake/build/mooncake-store/src/mooncake_master \
+//       --rpc_address=0.0.0.0 \
+//       --port=50051 \
+//       --rpc_thread_num=16 \
+//       --enable_http_metadata_server=true \
+//       --http_metadata_server_host=0.0.0.0 \
+//       --http_metadata_server_port=8080 \
+//       --default_kv_lease_ttl=600000 \
+//       --default_kv_soft_pin_ttl=3600000
+//
+//   # Enter container (optional; to run clients in the same env)
+//   nerdctl --namespace k8s.io exec -it mooncake-node-cxy380 bash
+//
+//   export MC_STORE_MEMCPY=1
+//   START_MS=$(($(date +%s%3N) + 80000))  # use the same START_MS on all nodes
+//
+//   # Node 1
+//   /vllm-workspace/Mooncake/build/mooncake-store/tests/real_client_stress_workload_test_v038 \
+//     --local_hostname=192.168.200.25:12345 \
+//     --master_address=192.168.200.25:50051 \
+//     --metadata_connection_string=http://192.168.200.25:8080/metadata \
 //     --protocol=tcp \
-//     --node_id=1 --num_nodes=2 \
+//     --node_id=1 --num_nodes=3 \
 //     --key_count=1000 --value_size=1048576 \
-//     --num_threads=8 --test_operation_nums=1000 \
+//     --num_threads=4 --test_operation_nums=500 \
 //     --remote_read_ratio=0.5 \
 //     --global_segment_size=2147483648 \
 //     --start_timestamp_ms=$START_MS
 //
-//   # Node 2 (same START_MS, different node_id and local_hostname)
-//   ./real_client_stress_workload_test_v038 \
-//     --local_hostname=10.0.0.12:12346 \
-//     --node_id=2 --num_nodes=2 ...
+//   # Node 2 (same START_MS)
+//   /vllm-workspace/Mooncake/build/mooncake-store/tests/real_client_stress_workload_test_v038 \
+//     --local_hostname=192.168.200.15:12345 \
+//     --master_address=192.168.200.25:50051 \
+//     --metadata_connection_string=http://192.168.200.25:8080/metadata \
+//     --protocol=tcp \
+//     --node_id=2 --num_nodes=3 \
+//     --key_count=1000 --value_size=1048576 \
+//     --num_threads=4 --test_operation_nums=500 \
+//     --remote_read_ratio=0.5 \
+//     --global_segment_size=2147483648 \
+//     --start_timestamp_ms=$START_MS
+//
+//   # Node 3 (same START_MS)
+//   /vllm-workspace/Mooncake/build/mooncake-store/tests/real_client_stress_workload_test_v038 \
+//     --local_hostname=192.168.200.27:12345 \
+//     --master_address=192.168.200.25:50051 \
+//     --metadata_connection_string=http://192.168.200.25:8080/metadata \
+//     --protocol=tcp \
+//     --node_id=3 --num_nodes=3 \
+//     --key_count=1000 --value_size=1048576 \
+//     --num_threads=4 --test_operation_nums=500 \
+//     --remote_read_ratio=0.5 \
+//     --global_segment_size=2147483648 \
+//     --start_timestamp_ms=$START_MS
 
 #include <gflags/gflags.h>
 #include <glog/logging.h>
@@ -51,9 +85,7 @@
 #include <thread>
 #include <vector>
 
-// v0.3.8: real_client.h includes rpc_types.h which includes replica.h,
-// so ReplicateConfig is available without a separate include.
-// No client_config_builder.h or p2p_rpc_types.h needed.
+// v0.3.8: real_client.h pulls in the types we need (including ReplicateConfig).
 #include "real_client.h"
 
 using namespace mooncake;
@@ -121,14 +153,13 @@ std::string generate_key(int node_id, int idx) {
 }
 
 // ── Client initialization ────────────────────────────────────────────────────
-// v0.3.8: uses RealClient::setup_real() with flat parameters.
-// pr-1631 equivalent uses ClientConfigBuilder + setup(config).
+// v0.3.8: RealClient::setup_real() with flat parameters.
 bool initialize_real_client() {
     auto client = RealClient::create();
 
     int rc = client->setup_real(
-        FLAGS_local_hostname,             // "host:port" format required in v0.3.8
-        FLAGS_metadata_connection_string, // HTTP metadata server URL
+        FLAGS_local_hostname,             // v0.3.8 requires "host:port"
+        FLAGS_metadata_connection_string, // HTTP metadata endpoint URL
         static_cast<size_t>(FLAGS_global_segment_size),
         static_cast<size_t>(FLAGS_local_buffer_size),
         FLAGS_protocol,
@@ -248,8 +279,7 @@ void print_read_results(const std::vector<ThreadStats>& thread_stats,
 }
 
 // ── Preload ──────────────────────────────────────────────────────────────────
-// v0.3.8: put_from(key, void* buf, size_t size, const ReplicateConfig&)
-// pr-1631: put_from(key, void* buf, size_t size, WriteConfig variant)
+// v0.3.8: put_from(key, buf, size, ReplicateConfig)
 bool preload_keys() {
     std::vector<char> buffer(FLAGS_value_size, 'A');
     if (g_client->register_buffer(buffer.data(), buffer.size()) != 0) {
@@ -257,7 +287,6 @@ bool preload_keys() {
         return false;
     }
 
-    // v0.3.8: ReplicateConfig is passed directly (no WriteConfig variant).
     ReplicateConfig write_cfg;
     write_cfg.prefer_alloc_in_same_node = true; 
     for (int i = 0; i < FLAGS_key_count; ++i) {
@@ -281,8 +310,7 @@ bool preload_keys() {
 }
 
 // ── Stress-read worker ───────────────────────────────────────────────────────
-// v0.3.8: get_into(key, void* buf, size_t size) — no ReadRouteConfig param.
-// pr-1631: get_into(key, void* buf, size_t size, ReadRouteConfig)
+// v0.3.8: get_into(key, buf, size) (no routing config parameter).
 void stress_read_worker(int thread_id,
                         const std::vector<std::string>& /*local_keys*/,
                         const std::vector<int>& remote_node_ids,
@@ -317,7 +345,7 @@ void stress_read_worker(int thread_id,
 
         if (choose_remote) {
             if (total_remote_keys <= 0) continue;
-            // Uniform random across ALL remote keys (not per-node).
+            // Uniform random over all remote keys (across all remote nodes).
             std::uniform_int_distribution<int> remote_key_dist(
                 0, total_remote_keys - 1);
             const int gidx = remote_key_dist(rng);
@@ -333,7 +361,6 @@ void stress_read_worker(int thread_id,
         const std::string key = generate_key(target_node, key_idx);
 
         const auto t_start = std::chrono::high_resolution_clock::now();
-        // v0.3.8: get_into has no ReadRouteConfig parameter.
         const int64_t bytes_read =
             g_client->get_into(key, buffer.data(), buffer.size());
         const auto t_end = std::chrono::high_resolution_clock::now();
@@ -374,7 +401,7 @@ void stress_read_worker(int thread_id,
 
 // ── Stress-read coordinator ──────────────────────────────────────────────────
 bool stress_read() {
-    // Build remote node list from node_id + num_nodes (no shared file needed).
+    // Derive remote node IDs from (node_id, num_nodes).
     std::vector<int> remote_node_ids;
     remote_node_ids.reserve(std::max(0, FLAGS_num_nodes - 1));
     for (int nid = 1; nid <= FLAGS_num_nodes; ++nid) {
@@ -450,8 +477,8 @@ int main(int argc, char** argv) {
     if (!ok) {
         LOG(ERROR) << "preload-then-read: preload phase failed";
     } else {
-        // Optional: wait until a globally-agreed start time so all nodes
-        // begin the read phase at the same moment (requires NTP sync).
+        // Optional: wait until a shared start time so nodes begin reads together
+        // (requires reasonably synchronized clocks).
         if (FLAGS_start_timestamp_ms > 0) {
             using clock = std::chrono::system_clock;
             const auto now = clock::now();
@@ -479,12 +506,11 @@ int main(int argc, char** argv) {
         ok = stress_read();
     }
 
-    // Keep the process alive for 30 s so other nodes can still issue remote
-    // reads against this node's data before cleanup.
+    // Keep alive briefly so other nodes can still issue remote reads.
     if (ok) {
         LOG(INFO) << "Test finished successfully, keeping process alive for "
-                     "30 s before cleanup to allow in-flight remote reads";
-        std::this_thread::sleep_for(std::chrono::seconds(30));
+                     "120 s before cleanup to allow in-flight remote reads";
+        std::this_thread::sleep_for(std::chrono::seconds(120));
     } else {
         LOG(WARNING) << "Test failed, skipping post-test delay.";
     }
