@@ -16,22 +16,17 @@
 #ifndef ASCEND_DIRECT_TRANSPORT_H
 #define ASCEND_DIRECT_TRANSPORT_H
 
-#include <atomic>
-#include <cstddef>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 #include <condition_variable>
-#include <set>
 
-#include <acl/acl.h>
 #include "transfer_metadata.h"
 #include "transport/transport.h"
-#include "adxl/adxl_engine.h"
+
+#include "slice_dispatcher.h"
+#include "transfer_executor_base.h"
+#include <acl/acl.h>
 
 namespace mooncake {
 class TransferMetadata;
@@ -77,66 +72,17 @@ class AscendDirectTransport : public Transport {
    private:
     int allocateLocalSegmentID();
 
-    void workerThread();
+    // Add one engine to segment desc
+    int addEngineToSegmentDesc(int32_t device_id, aclrtContext context,
+                               const std::string &host_ip, SegmentDesc *desc);
 
-    void processSliceList(const std::vector<Slice *> &slice_list);
-
-    void connectAndTransfer(const std::string &target_adxl_engine_name,
-                            adxl::TransferOp operation,
-                            const std::vector<Slice *> &slice_list,
-                            int32_t times = 0);
-
-    void localCopy(TransferRequest::OpCode opcode,
-                   const std::vector<Slice *> &slice_list);
-
-    aclError copyWithBatch(TransferRequest::OpCode opcode,
-                           const std::vector<Slice *> &slice_list,
-                           aclrtMemcpyKind kind, size_t batch_num,
-                           size_t slice_index) const;
-
-    void copyWithSync(TransferRequest::OpCode opcode,
-                      const std::vector<Slice *> &slice_list,
-                      aclrtMemcpyKind kind);
-
-    void copyWithAsync(TransferRequest::OpCode opcode,
-                       const std::vector<Slice *> &slice_list,
-                       aclrtMemcpyKind kind);
-
-    uint16_t findAdxlListenPort() const;
-
-   private:
-    int InitAdxlEngine();
-
-    int checkAndConnect(const std::string &target_adxl_engine_name);
-
-    int disconnect(const std::string &target_adxl_engine_name,
-                   int32_t timeout_in_millis, bool force = false);
-
-    std::atomic_bool running_;
-    std::unique_ptr<adxl::AdxlEngine> adxl_;
-    std::map<void *, adxl::MemHandle> addr_to_mem_handle_;
-    std::mutex mem_handle_mutex_;
-
-    // Connection management for segment connections
-    std::set<std::string> connected_segments_;
-    std::mutex connection_mutex_;
-
-    // Async processing related members (similar to hccl_transport)
-    std::thread worker_thread_;
-    std::queue<std::vector<Slice *>> slice_queue_;
-    std::mutex queue_mutex_;
-    std::condition_variable queue_cv_;
-
-    int32_t device_logic_id_{};
-    aclrtContext rt_context_{nullptr};
-    int32_t connect_timeout_ = 10000;
-    int32_t transfer_timeout_ = 10000;
-    std::string local_adxl_engine_name_{};
-    aclrtStream stream_{};
-    bool use_buffer_pool_{false};
     int32_t base_port_ = 20000;
-    std::unordered_set<SegmentID> need_update_metadata_segs_;
-    bool use_short_connection_{false};
+    bool dummy_real_mode_{false};
+    bool roce_mode_{false};
+    std::vector<aclrtContext> local_engine_contexts_;
+
+    std::unique_ptr<TransferExecutorBase> transfer_executor_;
+    std::unique_ptr<ISliceDispatcher> dispatcher_;
 };
 
 }  // namespace mooncake
