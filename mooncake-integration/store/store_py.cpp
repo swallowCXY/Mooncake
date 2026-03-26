@@ -1491,12 +1491,6 @@ PYBIND11_MODULE(store, m) {
                 WriteConfig config =
                     config_opt.value_or(self.get_default_write_config());
                 py::gil_scoped_release release;
-                if (self.use_dummy_client_) {
-                    LOG(ERROR)
-                        << "batch_put_from_multi_buffers is not supported for "
-                           "dummy client now";
-                    return std::vector<int>{};
-                }
                 return self.store_->batch_put_from_multi_buffers(
                     keys, CastAddrs2Ptrs(all_buffer_ptrs), all_sizes, config);
             },
@@ -1516,12 +1510,6 @@ PYBIND11_MODULE(store, m) {
                    std::nullopt) {
                 ReadRouteConfig config = config_opt.value_or(ReadRouteConfig{});
                 py::gil_scoped_release release;
-                if (self.use_dummy_client_) {
-                    LOG(ERROR)
-                        << "batch_get_into_multi_buffers is not supported for "
-                           "dummy client now";
-                    return std::vector<int>{};
-                }
                 return self.store_->batch_get_into_multi_buffers(
                     keys, CastAddrs2Ptrs(all_buffer_ptrs), all_sizes,
                     aggregate_same_segment_task, config);

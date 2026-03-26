@@ -124,7 +124,12 @@ if (STORE_USE_ETCD)
     add_dependencies(mooncake_store build_etcd_wrapper)
 endif()
 
-if (BUILD_SHARED_LIBS)
+if(URING_LIB AND URING_INCLUDE)
+  target_compile_definitions(mooncake_store PUBLIC USE_URING)
+  target_include_directories(mooncake_store PRIVATE ${URING_INCLUDE})
+endif()
+
+if(BUILD_SHARED_LIBS)
   install(TARGETS mooncake_store DESTINATION lib)
 endif()
 
