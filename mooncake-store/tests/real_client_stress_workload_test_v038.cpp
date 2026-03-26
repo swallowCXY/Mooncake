@@ -163,6 +163,7 @@ struct ThreadStats {
     uint64_t remote_reads = 0;
     uint64_t local_successful_reads = 0;
     uint64_t remote_successful_reads = 0;
+    double successful_read_time_us = 0.0;
 };
 
 struct MixedThreadStats {
@@ -269,18 +270,25 @@ void print_read_results(const std::vector<ThreadStats>& thread_stats,
     double all_p50, all_p80, all_p95, all_p99;
     double local_p50, local_p80, local_p95, local_p99;
     double remote_p50, remote_p80, remote_p95, remote_p99;
+    double successful_read_time_us = 0.0;
 
     calculate_percentiles(all_latencies, all_p50, all_p80, all_p95, all_p99);
     calculate_percentiles(local_latencies, local_p50, local_p80, local_p95,
                           local_p99);
     calculate_percentiles(remote_latencies, remote_p50, remote_p80, remote_p95,
                           remote_p99);
+    for (const auto& stats : thread_stats) {
+        successful_read_time_us += stats.successful_read_time_us;
+    }
 
     const double reads_per_sec =
-        duration_s > 0 ? successful_reads / duration_s : 0.0;
+        successful_read_time_us > 0
+            ? successful_reads * 1e6 / successful_read_time_us
+            : 0.0;
     const double data_mb_per_sec =
-        duration_s > 0
-            ? (successful_reads * FLAGS_value_size) / (duration_s * 1024 * 1024)
+        successful_read_time_us > 0
+            ? (successful_reads * FLAGS_value_size) /
+                  ((successful_read_time_us / 1e6) * 1024 * 1024)
             : 0.0;
 
     LOG(INFO) << "=== RealClient Multi-Node Stress Results (v0.3.8) ===";
@@ -299,8 +307,10 @@ void print_read_results(const std::vector<ThreadStats>& thread_stats,
               << ", local successful reads: " << local_success;
     LOG(INFO) << "Remote reads: " << remote_reads
               << ", remote successful reads: " << remote_success;
-    LOG(INFO) << "Reads/sec: " << reads_per_sec;
-    LOG(INFO) << "Data throughput(MB/s): " << data_mb_per_sec;
+
+    LOG(INFO) << "Read active time(s): " << (successful_read_time_us / 1e6);
+    LOG(INFO) << "Reads/sec (by read time): " << reads_per_sec;
+    LOG(INFO) << "Data throughput(MB/s, by read time): " << data_mb_per_sec;
     LOG(INFO) << "All latency(us) p50/p80/p95/p99 = "
               << all_p50 << "/" << all_p80 << "/" << all_p95 << "/" << all_p99;
     LOG(INFO) << "Local latency(us) p50/p80/p95/p99 = "
@@ -420,6 +430,7 @@ void stress_read_worker(int thread_id,
 
             if (result.success) {
                 stats.successful_reads++;
+                stats.successful_read_time_us += result.latency_us;
                 if (choose_remote) {
                     stats.remote_successful_reads++;
                 } else {
