@@ -41,7 +41,7 @@ def generate_key(node_id: int, idx: int) -> str:
     return f"node_{node_id}_obj_{idx}"
 
 
-def build_write_config(_client_mode: str, _strict_visibility: bool = False):
+def build_write_config(_client_mode: str, strict_visibility: bool = False):
     # v0.3.8: writes use ReplicateConfig only (no WriteRouteRequestConfig).
     cfg = ReplicateConfig()
     cfg.replica_num = 1
@@ -546,7 +546,7 @@ def rw_correctness_worker(
         return
 
     key_prefix = f"rwcheck_node_{args.node_id}_thread_{thread_id}"
-    write_cfg = build_write_config(args.client_mode, strict_visibility=True)
+    write_cfg = build_write_config(args.client_mode, True)
     rng = random.Random(args.random_seed + 131 * thread_id)
     key_pool_size = max(1, args.rw_key_pool_size or args.key_count)
 
@@ -671,7 +671,7 @@ def concurrent_write_worker(
     if store.register_buffer(ptr, args.value_size) != 0:
         stats.write_failures += max(0, total_writes)
         return
-    write_cfg = build_write_config(args.client_mode, strict_visibility=False)
+    write_cfg = build_write_config(args.client_mode, False)
     for i in range(total_writes):
         seq = write_start_idx + i
         key = f"cw_node_{args.node_id}_thread_{thread_id}_seq_{seq}"
