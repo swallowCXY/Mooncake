@@ -342,8 +342,9 @@ def collect_latency_dumps(args: argparse.Namespace) -> List[str]:
 
         if is_remote:
             # Step 2: scp from remote host to local
-            scp_base = " ".join(ssh_base(args.ssh_user, args.ssh_password))
-            scp_cmd = f"{scp_base} {args.ssh_user}@{host}:{host_tmp_path} {local_path}"
+            scp_cmd = f"scp -o StrictHostKeyChecking=no {args.ssh_user}@{host}:{host_tmp_path} {local_path}"
+            if args.ssh_password:
+                scp_cmd = f"sshpass -p {sh_quote(args.ssh_password)} " + scp_cmd
             r2 = subprocess.run(scp_cmd, shell=True, capture_output=True, text=True)
             if r2.returncode != 0:
                 print(f"[WARN] scp failed for node {nid}: {r2.stderr}", file=sys.stderr)
@@ -377,7 +378,9 @@ def aggregate_cluster_stats(node_stats: List[dict], latency_files: List[str]) ->
     total_wall_clock_reads_per_sec = 0.0
     total_wall_clock_data_mb_per_sec = 0.0
     total_reads_per_sec_by_read_time = 0.0
+    total_data_mb_per_sec_by_read_time = 0.0
     total_writes_per_sec_by_write_time = 0.0
+    total_write_mb_per_sec_by_write_time = 0.0
 
     for s in node_stats:
         total_successful_reads += s.get("successful_reads", 0)
@@ -389,7 +392,10 @@ def aggregate_cluster_stats(node_stats: List[dict], latency_files: List[str]) ->
         total_wall_clock_reads_per_sec += s.get("wall_clock_reads_per_sec", 0)
         total_wall_clock_data_mb_per_sec += s.get("wall_clock_data_mb_per_sec", 0)
         total_reads_per_sec_by_read_time += s.get("reads_per_sec_by_read_time", 0)
-        total_writes_per_sec_by_write_time += s.get("writes_per_sec_by_write_time", 0)
+        total_data_mb_per_sec_by_read_time += s.get("data_mb_per_sec_by_read_time", 0)
+        write_ops = s.get("writes_per_sec_by_write_time", s.get("write_ops_per_sec", 0))
+        total_writes_per_sec_by_write_time += write_ops
+        total_write_mb_per_sec_by_write_time += s.get("write_mb_per_sec", 0)
 
     # Merge raw latencies for global percentiles
     merged_all: List[np.ndarray] = []
@@ -440,7 +446,9 @@ def aggregate_cluster_stats(node_stats: List[dict], latency_files: List[str]) ->
         "cluster_wall_clock_reads_per_sec": total_wall_clock_reads_per_sec,
         "cluster_wall_clock_data_mb_per_sec": total_wall_clock_data_mb_per_sec,
         "cluster_reads_per_sec_by_read_time": total_reads_per_sec_by_read_time,
+        "cluster_data_mb_per_sec_by_read_time": total_data_mb_per_sec_by_read_time,
         "cluster_writes_per_sec_by_write_time": total_writes_per_sec_by_write_time,
+        "cluster_write_mb_per_sec_by_write_time": total_write_mb_per_sec_by_write_time,
     }
 
     if merged_all:
@@ -450,9 +458,14 @@ def aggregate_cluster_stats(node_stats: List[dict], latency_files: List[str]) ->
         result["all_latency_p99_us"] = all_p[3]
     if merged_local:
         result["local_latency_p50_us"] = local_p[0]
+        result["local_latency_p80_us"] = local_p[1]
+        result["local_latency_p95_us"] = local_p[2]
         result["local_latency_p99_us"] = local_p[3]
+
     if merged_remote:
         result["remote_latency_p50_us"] = remote_p[0]
+        result["remote_latency_p80_us"] = remote_p[1]
+        result["remote_latency_p95_us"] = remote_p[2]
         result["remote_latency_p99_us"] = remote_p[3]
     if merged_read:
         result["read_latency_p50_us"] = read_p[0]
@@ -482,6 +495,18 @@ def print_cluster_summary(cluster: dict):
     print(f"Correctness failures: {cluster.get('total_correctness_failures', 0)}")
     print(f"Cluster wall-clock reads/sec: {cluster.get('cluster_wall_clock_reads_per_sec', 0):.2f}")
     print(f"Cluster wall-clock data MB/s: {cluster.get('cluster_wall_clock_data_mb_per_sec', 0):.2f}")
+    print(
+        "Data throughput(MB/s, by read time): "
+        f"{cluster.get('cluster_data_mb_per_sec_by_read_time', 0):.2f}"
+    )
+    print(
+        "Write throughput(ops/s, by write time): "
+        f"{cluster.get('cluster_writes_per_sec_by_write_time', 0):.2f}"
+    )
+    print(
+        "Write throughput(MB/s, by write time): "
+        f"{cluster.get('cluster_write_mb_per_sec_by_write_time', 0):.2f}"
+    )
 
     def show_lat(prefix):
         p50 = cluster.get(f"{prefix}_p50_us")
