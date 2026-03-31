@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -161,6 +162,8 @@ def build_python_cmd(
         common.append("--run_mode=once")
         if args.start_timestamp_ms > 0:
             common.append(f"--start_timestamp_ms={args.start_timestamp_ms}")
+    if getattr(args, "latency_dump_file", ""):
+        common.append(f"--latency_dump_file={args.latency_dump_file}")
     return " ".join(common)
 
 
@@ -224,7 +227,13 @@ def start_client_container(
     control_port: int,
 ) -> None:
     name = f"mc-client-node{node_id}"
+    old_dump = getattr(args, "latency_dump_file", "")
+    if getattr(args, "latency_dump_dir", ""):
+        args.latency_dump_file = f"/tmp/node_{node_id}_latencies.npz"
+    else:
+        args.latency_dump_file = ""
     py_cmd = build_python_cmd(args, node_id, len(args.client_hosts), rpc_port, control_port)
+    args.latency_dump_file = old_dump
     py_shell = py_cmd + " && sleep infinity"
     inner = (
         f"nerdctl rm -f {name} 2>/dev/null || true; "
@@ -307,6 +316,189 @@ def collect_stats(args: argparse.Namespace) -> List[dict]:
     return merged
 
 
+def collect_latency_dumps(args: argparse.Namespace) -> List[str]:
+    """Copy latency .npz from each container to host, then scp remote files locally.
+    Returns list of local .npz file paths."""
+    dump_dir = Path(args.latency_dump_dir)
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    local_files: List[str] = []
+
+    for i, host in enumerate(args.client_hosts):
+        nid = i + 1
+        container_path = f"/tmp/node_{nid}_latencies.npz"
+        host_tmp_path = f"/tmp/node_{nid}_latencies.npz"
+        local_path = str(dump_dir / f"node_{nid}_latencies.npz")
+
+        container_name = f"mc-client-node{nid}"
+        is_remote = not is_local_host(host)
+
+        # Step 1: nerdctl cp from container to host's /tmp
+        cp_cmd = f"nerdctl cp {container_name}:{container_path} {host_tmp_path}"
+        r = run_shell(cp_cmd, host=host if is_remote else None,
+                      ssh_user=args.ssh_user, ssh_password=args.ssh_password)
+        if r.returncode != 0:
+            print(f"[WARN] nerdctl cp failed for node {nid}: {r.stderr}", file=sys.stderr)
+            continue
+
+        if is_remote:
+            # Step 2: scp from remote host to local
+            scp_base = " ".join(ssh_base(args.ssh_user, args.ssh_password))
+            scp_cmd = f"{scp_base} {args.ssh_user}@{host}:{host_tmp_path} {local_path}"
+            r2 = subprocess.run(scp_cmd, shell=True, capture_output=True, text=True)
+            if r2.returncode != 0:
+                print(f"[WARN] scp failed for node {nid}: {r2.stderr}", file=sys.stderr)
+                continue
+            # Cleanup remote temp
+            run_shell(f"rm -f {host_tmp_path}", host=host, ssh_user=args.ssh_user, ssh_password=args.ssh_password)
+        else:
+            shutil.move(host_tmp_path, local_path)
+
+        local_files.append(local_path)
+        print(f"[INFO] Collected latency dump: node {nid} -> {local_path}")
+
+    return local_files
+
+
+def aggregate_cluster_stats(node_stats: List[dict], latency_files: List[str]) -> dict:
+    """Aggregate per-node stats into cluster-level summary.
+    - Counters: sum
+    - Duration: max
+    - Throughput (wall-clock): sum
+    - Percentiles: merge raw latencies and recompute via np.percentile
+    """
+    import numpy as np
+
+    total_successful_reads = 0
+    total_successful_writes = 0
+    total_read_failures = 0
+    total_write_failures = 0
+    total_correctness_failures = 0
+    max_duration_s = 0.0
+    total_wall_clock_reads_per_sec = 0.0
+    total_wall_clock_data_mb_per_sec = 0.0
+    total_reads_per_sec_by_read_time = 0.0
+    total_writes_per_sec_by_write_time = 0.0
+
+    for s in node_stats:
+        total_successful_reads += s.get("successful_reads", 0)
+        total_successful_writes += s.get("successful_writes", 0)
+        total_read_failures += s.get("read_failures", 0)
+        total_write_failures += s.get("write_failures", 0)
+        total_correctness_failures += s.get("correctness_failures", 0)
+        max_duration_s = max(max_duration_s, s.get("duration_s", 0))
+        total_wall_clock_reads_per_sec += s.get("wall_clock_reads_per_sec", 0)
+        total_wall_clock_data_mb_per_sec += s.get("wall_clock_data_mb_per_sec", 0)
+        total_reads_per_sec_by_read_time += s.get("reads_per_sec_by_read_time", 0)
+        total_writes_per_sec_by_write_time += s.get("writes_per_sec_by_write_time", 0)
+
+    # Merge raw latencies for global percentiles
+    merged_all: List[np.ndarray] = []
+    merged_local: List[np.ndarray] = []
+    merged_remote: List[np.ndarray] = []
+    merged_read: List[np.ndarray] = []
+    merged_write: List[np.ndarray] = []
+
+    for fpath in latency_files:
+        try:
+            data = np.load(fpath, allow_pickle=False)
+            if "all" in data:
+                merged_all.append(data["all"])
+            if "local" in data:
+                merged_local.append(data["local"])
+            if "remote" in data:
+                merged_remote.append(data["remote"])
+            if "read" in data:
+                merged_read.append(data["read"])
+            if "write" in data:
+                merged_write.append(data["write"])
+        except Exception as e:
+            print(f"[WARN] Failed to load {fpath}: {e}", file=sys.stderr)
+
+    def pct(arrays: List[np.ndarray]):
+        if not arrays:
+            return (0.0, 0.0, 0.0, 0.0)
+        combined = np.concatenate(arrays)
+        if len(combined) == 0:
+            return (0.0, 0.0, 0.0, 0.0)
+        p = np.percentile(combined, [50, 80, 95, 99])
+        return tuple(float(x) for x in p)
+
+    all_p = pct(merged_all)
+    local_p = pct(merged_local)
+    remote_p = pct(merged_remote)
+    read_p = pct(merged_read)
+    write_p = pct(merged_write)
+
+    result: dict = {
+        "num_nodes": len(node_stats),
+        "max_duration_s": max_duration_s,
+        "total_successful_reads": total_successful_reads,
+        "total_successful_writes": total_successful_writes,
+        "total_read_failures": total_read_failures,
+        "total_write_failures": total_write_failures,
+        "total_correctness_failures": total_correctness_failures,
+        "cluster_wall_clock_reads_per_sec": total_wall_clock_reads_per_sec,
+        "cluster_wall_clock_data_mb_per_sec": total_wall_clock_data_mb_per_sec,
+        "cluster_reads_per_sec_by_read_time": total_reads_per_sec_by_read_time,
+        "cluster_writes_per_sec_by_write_time": total_writes_per_sec_by_write_time,
+    }
+
+    if merged_all:
+        result["all_latency_p50_us"] = all_p[0]
+        result["all_latency_p80_us"] = all_p[1]
+        result["all_latency_p95_us"] = all_p[2]
+        result["all_latency_p99_us"] = all_p[3]
+    if merged_local:
+        result["local_latency_p50_us"] = local_p[0]
+        result["local_latency_p99_us"] = local_p[3]
+    if merged_remote:
+        result["remote_latency_p50_us"] = remote_p[0]
+        result["remote_latency_p99_us"] = remote_p[3]
+    if merged_read:
+        result["read_latency_p50_us"] = read_p[0]
+        result["read_latency_p80_us"] = read_p[1]
+        result["read_latency_p95_us"] = read_p[2]
+        result["read_latency_p99_us"] = read_p[3]
+    if merged_write:
+        result["write_latency_p50_us"] = write_p[0]
+        result["write_latency_p80_us"] = write_p[1]
+        result["write_latency_p95_us"] = write_p[2]
+        result["write_latency_p99_us"] = write_p[3]
+
+    return result
+
+
+def print_cluster_summary(cluster: dict):
+    """Pretty-print the cluster-level aggregated stats."""
+    print("\n" + "=" * 60)
+    print("CLUSTER-LEVEL AGGREGATED RESULTS")
+    print("=" * 60)
+    print(f"Nodes: {cluster.get('num_nodes', '?')}")
+    print(f"Max duration(s): {cluster.get('max_duration_s', 0):.2f}")
+    print(f"Total successful reads: {cluster.get('total_successful_reads', 0)}")
+    print(f"Total successful writes: {cluster.get('total_successful_writes', 0)}")
+    print(f"Read failures: {cluster.get('total_read_failures', 0)}")
+    print(f"Write failures: {cluster.get('total_write_failures', 0)}")
+    print(f"Correctness failures: {cluster.get('total_correctness_failures', 0)}")
+    print(f"Cluster wall-clock reads/sec: {cluster.get('cluster_wall_clock_reads_per_sec', 0):.2f}")
+    print(f"Cluster wall-clock data MB/s: {cluster.get('cluster_wall_clock_data_mb_per_sec', 0):.2f}")
+
+    def show_lat(prefix):
+        p50 = cluster.get(f"{prefix}_p50_us")
+        p80 = cluster.get(f"{prefix}_p80_us")
+        p95 = cluster.get(f"{prefix}_p95_us")
+        p99 = cluster.get(f"{prefix}_p99_us")
+        if p50 is not None:
+            print(f"  {prefix}(us) p50/p80/p95/p99 = {p50:.0f}/{p80:.0f}/{p95:.0f}/{p99:.0f}")
+
+    show_lat("all_latency")
+    show_lat("local_latency")
+    show_lat("remote_latency")
+    show_lat("read_latency")
+    show_lat("write_latency")
+    print("=" * 60)
+
+
 def cmd_run(ns: argparse.Namespace) -> int:
     ns.client_hosts = parse_client_ips(ns.client_ips)
     if not ns.client_hosts:
@@ -354,9 +546,12 @@ def cmd_run(ns: argparse.Namespace) -> int:
         if not wait_test_completed(ns):
             return 1
         stats = collect_stats(ns)
+        latency_files = collect_latency_dumps(ns)
         if stats:
+            cluster = aggregate_cluster_stats(stats, latency_files)
+            print_cluster_summary(cluster)
             out = Path(ns.merge_output)
-            out.write_text(json.dumps({"nodes": stats}, indent=2), encoding="utf-8")
+            out.write_text(json.dumps({"cluster": cluster, "nodes": stats}, indent=2), encoding="utf-8")
             print(f"[INFO] Wrote merged stats to {out}")
         for i, host in enumerate(ns.client_hosts):
             nid = i + 1
@@ -450,6 +645,11 @@ def main() -> int:
     pr.add_argument("--no-wait", action="store_true", help="Do not wait for completion")
     pr.add_argument("--no-cleanup", action="store_true", help="Do not remove containers after run")
     pr.add_argument("--merge-output", default="merged_stress_report.json")
+    pr.add_argument(
+        "--latency-dump-dir",
+        default=os.environ.get("LATENCY_DUMP_DIR", "/tmp/mooncake_stress_dumps"),
+        help="Host directory to collect latency .npz dumps from all nodes",
+    )
     pr.set_defaults(func=cmd_run)
 
     pk = sub.add_parser("kill", help="Remove client and master containers")
@@ -472,3 +672,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

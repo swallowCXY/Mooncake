@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import math
 import random
 import socket
@@ -57,13 +58,22 @@ def build_preload_write_config(_client_mode: str):
 def calculate_percentiles(latencies: List[float]) -> Tuple[float, float, float, float]:
     if not latencies:
         return 0.0, 0.0, 0.0, 0.0
-    s = sorted(latencies)
-    n = len(s)
+    p50, p80, p95, p99 = np.percentile(latencies, [50, 80, 95, 99])
+    return float(p50), float(p80), float(p95), float(p99)
 
-    def idx(ratio: float) -> int:
-        return min(n - 1, max(0, int(math.ceil(n * ratio - 1))))
 
-    return s[idx(0.50)], s[idx(0.80)], s[idx(0.95)], s[idx(0.99)]
+def dump_latencies(path: str, **arrays: List[float]):
+    """Save named latency arrays to a .npz file."""
+    if not path or not arrays:
+        return
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        np.savez(path, **{k: np.array(v, dtype=np.float64) for k, v in arrays.items() if v})
+        logger.info("Dumped latencies to %s", path)
+    except Exception as e:
+        logger.warning("Failed to dump latencies to %s: %s", path, e)
 
 
 @dataclass
@@ -208,8 +218,17 @@ def print_read_results(thread_stats: List[ThreadStats], duration_s: float, args:
     logger.info("Local reads: %s, local successful reads: %s", local_reads, local_success)
     logger.info("Remote reads: %s, remote successful reads: %s", remote_reads, remote_success)
     logger.info("Read active time(s): %s", successful_read_time_us / 1e6)
+    wall_clock_reads_per_sec = successful_reads / duration_s if duration_s > 0 else 0.0
+    wall_clock_data_mb_per_sec = (
+        (successful_reads * args.value_size) / (duration_s * 1024 * 1024)
+        if duration_s > 0
+        else 0.0
+    )
+
     logger.info("Reads/sec (by read time): %s", reads_per_sec)
     logger.info("Data throughput(MB/s, by read time): %s", data_mb_per_sec)
+    logger.info("Reads/sec (wall-clock): %s", wall_clock_reads_per_sec)
+    logger.info("Data throughput(MB/s, wall-clock): %s", wall_clock_data_mb_per_sec)
     logger.info(
         "All latency(us) p50/p80/p95/p99 = %s/%s/%s/%s", all_p50, all_p80, all_p95, all_p99
     )
@@ -220,16 +239,42 @@ def print_read_results(thread_stats: List[ThreadStats], duration_s: float, args:
         "Remote latency(us) p50/p80/p95/p99 = %s/%s/%s/%s", rp50, rp80, rp95, rp99
     )
 
+    success_rate = 0.0 if total_reads == 0 else 100.0 * successful_reads / total_reads
+
+    if args.latency_dump_file:
+        dump_latencies(args.latency_dump_file, all=all_latencies, local=local_latencies, remote=remote_latencies)
+
     return {
         "workload": "preload_then_read",
         "node_id": args.node_id,
         "duration_s": duration_s,
+        "num_threads": args.num_threads,
+        "value_size": args.value_size,
         "total_reads": total_reads,
         "successful_reads": successful_reads,
+        "success_rate": success_rate,
+        "query_failures": query_failures,
+        "get_failures": get_failures,
+        "local_reads": local_reads,
+        "local_successful_reads": local_success,
+        "remote_reads": remote_reads,
+        "remote_successful_reads": remote_success,
+        "reads_per_sec_by_read_time": reads_per_sec,
+        "data_mb_per_sec_by_read_time": data_mb_per_sec,
+        "wall_clock_reads_per_sec": wall_clock_reads_per_sec,
+        "wall_clock_data_mb_per_sec": wall_clock_data_mb_per_sec,
         "all_latency_p50_us": all_p50,
+        "all_latency_p80_us": all_p80,
+        "all_latency_p95_us": all_p95,
         "all_latency_p99_us": all_p99,
-        "reads_per_sec": reads_per_sec,
-        "data_mb_per_sec": data_mb_per_sec,
+        "local_latency_p50_us": lp50,
+        "local_latency_p80_us": lp80,
+        "local_latency_p95_us": lp95,
+        "local_latency_p99_us": lp99,
+        "remote_latency_p50_us": rp50,
+        "remote_latency_p80_us": rp80,
+        "remote_latency_p95_us": rp95,
+        "remote_latency_p99_us": rp99,
     }
 
 
@@ -350,7 +395,7 @@ def stress_read(store: MooncakeDistributedStore, args: argparse.Namespace) -> Di
     return print_read_results(thread_stats, duration_s, args)
 
 
-def print_mixed_results(thread_stats: List[MixedThreadStats], title: str) -> Dict[str, Any]:
+def print_mixed_results(thread_stats: List[MixedThreadStats], title: str, latency_dump_file: str = "") -> Dict[str, Any]:
     read_attempts = write_attempts = successful_reads = successful_writes = 0
     exist_calls = exist_failures = read_failures = write_failures = correctness_failures = 0
     successful_read_time_us = successful_write_time_us = 0.0
@@ -407,13 +452,30 @@ def print_mixed_results(thread_stats: List[MixedThreadStats], title: str) -> Dic
     logger.info("Read latency(us) p50/p80/p95/p99 = %s/%s/%s/%s", rp50, rp80, rp95, rp99)
     logger.info("Write latency(us) p50/p80/p95/p99 = %s/%s/%s/%s", wp50, wp80, wp95, wp99)
 
+    if latency_dump_file:
+        dump_latencies(latency_dump_file, read=read_latencies, write=write_latencies)
+
     return {
         "workload": title,
         "read_attempts": read_attempts,
         "successful_reads": successful_reads,
+        "read_failures": read_failures,
         "write_attempts": write_attempts,
         "successful_writes": successful_writes,
+        "write_failures": write_failures,
+        "exist_calls": exist_calls,
+        "exist_failures": exist_failures,
         "correctness_failures": correctness_failures,
+        "reads_per_sec_by_read_time": reads_per_sec,
+        "writes_per_sec_by_write_time": writes_per_sec,
+        "read_latency_p50_us": rp50,
+        "read_latency_p80_us": rp80,
+        "read_latency_p95_us": rp95,
+        "read_latency_p99_us": rp99,
+        "write_latency_p50_us": wp50,
+        "write_latency_p80_us": wp80,
+        "write_latency_p95_us": wp95,
+        "write_latency_p99_us": wp99,
     }
 
 
@@ -523,7 +585,7 @@ def operation_sequence_workload(store: MooncakeDistributedStore, args: argparse.
         th.start()
     for th in threads:
         th.join()
-    return print_mixed_results(stats, "Operation Sequence Workload")
+    return print_mixed_results(stats, "Operation Sequence Workload", args.latency_dump_file)
 
 
 def rw_correctness_worker(
@@ -546,7 +608,7 @@ def rw_correctness_worker(
         return
 
     key_prefix = f"rwcheck_node_{args.node_id}_thread_{thread_id}"
-    write_cfg = build_write_config(args.client_mode, True)
+    write_cfg = build_write_config(args.client_mode, strict_visibility=True)
     rng = random.Random(args.random_seed + 131 * thread_id)
     key_pool_size = max(1, args.rw_key_pool_size or args.key_count)
 
@@ -646,7 +708,7 @@ def concurrent_rw_correctness_workload(store: MooncakeDistributedStore, args: ar
         th.start()
     for th in threads:
         th.join()
-    summary = print_mixed_results(stats, "Concurrent Read/Write Correctness")
+    summary = print_mixed_results(stats, "Concurrent Read/Write Correctness", args.latency_dump_file)
     total_cf = sum(st.correctness_failures for st in stats)
     total_rf = sum(st.read_failures for st in stats)
     total_wf = sum(st.write_failures for st in stats)
@@ -671,7 +733,7 @@ def concurrent_write_worker(
     if store.register_buffer(ptr, args.value_size) != 0:
         stats.write_failures += max(0, total_writes)
         return
-    write_cfg = build_write_config(args.client_mode, False)
+    write_cfg = build_write_config(args.client_mode, strict_visibility=False)
     for i in range(total_writes):
         seq = write_start_idx + i
         key = f"cw_node_{args.node_id}_thread_{thread_id}_seq_{seq}"
@@ -692,7 +754,8 @@ def concurrent_write_worker(
 
 
 def run_concurrent_write_phase(
-    store: MooncakeDistributedStore, args: argparse.Namespace, num_threads: int, total_write_ops: int, title: str
+    store: MooncakeDistributedStore, args: argparse.Namespace, num_threads: int, total_write_ops: int, title: str,
+    latency_dump_file: str = "",
 ) -> ConcurrentWriteResult:
     result = ConcurrentWriteResult()
     if num_threads <= 0 or total_write_ops <= 0:
@@ -765,6 +828,10 @@ def run_concurrent_write_phase(
         result.success_rate * 100.0,
     )
     logger.info("Write latency(us) p50/p80/p95/p99 = %s/%s/%s/%s", result.p50, result.p80, result.p95, result.p99)
+
+    if latency_dump_file:
+        dump_latencies(latency_dump_file, write=all_lat)
+
     return result
 
 
@@ -839,6 +906,7 @@ def concurrent_write_no_evict_workload(store: MooncakeDistributedStore, args: ar
         args.num_threads,
         target_ops,
         "Concurrent Write No-Evict",
+        args.latency_dump_file,
     )
     perf_ok = result.successful_writes > 0
     vok = verify_concurrent_write_results(store, args, result.successful_keys)
@@ -895,7 +963,8 @@ def concurrent_write_with_evict_workload(store: MooncakeDistributedStore, args: 
         actual_payload_bytes,
     )
     result = run_concurrent_write_phase(
-        store, args, args.num_threads, target_ops, "Concurrent Write With-Evict"
+        store, args, args.num_threads, target_ops, "Concurrent Write With-Evict",
+        args.latency_dump_file,
     )
     perf_ok = result.successful_writes > 0
     vok = verify_concurrent_write_results(store, args, result.successful_keys)
@@ -1068,6 +1137,11 @@ def parse_args() -> argparse.Namespace:
         default="0.0.0.0:0",
         help="Host:port to listen for READ (orchestrated preload_then_read). Port 0 = auto",
     )
+    p.add_argument(
+        "--latency_dump_file",
+        default="",
+        help="Path inside container to dump raw latency arrays as .npz (e.g. /tmp/node_1_latencies.npz)",
+    )
     return p.parse_args()
 
 
@@ -1194,3 +1268,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
