@@ -5,6 +5,33 @@
 
 namespace mooncake {
 
+namespace {
+
+// Lightweight data fingerprint: XOR of head(32B)/mid(32B)/tail(32B) + first 8B hex
+static std::string DataFingerprint(const void* data, size_t size) {
+    if (!data || size == 0) return "(nil)";
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    uint64_t fp = 0;
+    auto xor_into = [&](const uint8_t* start, size_t len) {
+        for (size_t i = 0; i < len; ++i)
+            fp ^= (uint64_t)start[i] << ((i % 8) * 8);
+    };
+    size_t head = std::min(size, (size_t)32);
+    xor_into(p, head);
+    if (size > 64) xor_into(p + size / 2 - 16, 32);
+    if (size > 32) xor_into(p + size - 32, std::min((size_t)32, size - 32));
+    char hex[64];
+    int pos = 0;
+    for (int i = 0; i < std::min((int)size, 8); ++i)
+        pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x", p[i]);
+    char result[128];
+    snprintf(result, sizeof(result), "fp=0x%016lx head=[%s] size=%zu",
+             (unsigned long)fp, hex, size);
+    return std::string(result);
+}
+
+}  // namespace
+
 ClientRpcService::ClientRpcService(DataManager& data_manager)
     : data_manager_(data_manager) {}
 
@@ -37,6 +64,22 @@ tl::expected<void, ErrorCode> ClientRpcService::ReadRemoteData(
     }
 
     // Delegate to DataManager
+    size_t total_dest_size = 0;
+    for (const auto& buf : request.dest_buffers) total_dest_size += buf.size;
+    LOG(INFO) << "[P2P_DIAG] READ_RECV_RPC key=" << request.key
+              << " buf_count=" << request.dest_buffers.size()
+              << " total_size=" << total_dest_size
+              << " buf_sizes=["
+              << [&]() {
+                   std::string s;
+                   for (size_t i = 0; i < request.dest_buffers.size(); ++i) {
+                       if (i > 0) s += ",";
+                       s += std::to_string(request.dest_buffers[i].size);
+                   }
+                   return s;
+               }()
+              << "]";
+
     auto result =
         data_manager_.ReadRemoteData(request.key, request.dest_buffers);
 
@@ -85,6 +128,22 @@ tl::expected<UUID, ErrorCode> ClientRpcService::WriteRemoteData(
     }
 
     // Delegate to DataManager
+    size_t total_src_size = 0;
+    for (const auto& buf : request.src_buffers) total_src_size += buf.size;
+    LOG(INFO) << "[P2P_DIAG] WRITE_RECV_RPC key=" << request.key
+              << " buf_count=" << request.src_buffers.size()
+              << " total_size=" << total_src_size
+              << " buf_sizes=["
+              << [&]() {
+                   std::string s;
+                   for (size_t i = 0; i < request.src_buffers.size(); ++i) {
+                       if (i > 0) s += ",";
+                       s += std::to_string(request.src_buffers[i].size);
+                   }
+                   return s;
+               }()
+              << "]";
+
     auto result = data_manager_.WriteRemoteData(
         request.key, request.src_buffers, request.target_tier_id);
 

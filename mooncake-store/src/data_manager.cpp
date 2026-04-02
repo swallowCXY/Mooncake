@@ -18,6 +18,33 @@
 
 namespace mooncake {
 
+namespace {
+
+// Lightweight data fingerprint: XOR of head(32B)/mid(32B)/tail(32B) + first 8B hex
+static std::string DataFingerprint(const void* data, size_t size) {
+    if (!data || size == 0) return "(nil)";
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    uint64_t fp = 0;
+    auto xor_into = [&](const uint8_t* start, size_t len) {
+        for (size_t i = 0; i < len; ++i)
+            fp ^= (uint64_t)start[i] << ((i % 8) * 8);
+    };
+    size_t head = std::min(size, (size_t)32);
+    xor_into(p, head);
+    if (size > 64) xor_into(p + size / 2 - 16, 32);
+    if (size > 32) xor_into(p + size - 32, std::min((size_t)32, size - 32));
+    char hex[64];
+    int pos = 0;
+    for (int i = 0; i < std::min((int)size, 8); ++i)
+        pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x", p[i]);
+    char result[128];
+    snprintf(result, sizeof(result), "fp=0x%016lx head=[%s] size=%zu",
+             (unsigned long)fp, hex, size);
+    return std::string(result);
+}
+
+}  // namespace
+
 DataManager::DataManager(std::unique_ptr<TieredBackend> tiered_backend,
                          std::shared_ptr<TransferEngine> transfer_engine,
                          size_t lock_shard_count)
@@ -151,6 +178,16 @@ tl::expected<void, ErrorCode> DataManager::ReadRemoteData(
     }
 
     auto handle = handle_result.value();
+
+    // [P2P_DIAG] Fingerprint source data before transfer
+    const auto& src_data = handle->loc.data;
+    if (src_data.buffer) {
+        void* src_ptr = reinterpret_cast<void*>(src_data.buffer->data());
+        LOG(INFO) << "[P2P_DIAG] READ_BEFORE_TRANSFER key=" << key
+                  << " data_size=" << src_data.buffer->size()
+                  << " " << DataFingerprint(src_ptr, src_data.buffer->size());
+    }
+
     return TransferDataToRemote(handle, dest_buffers);
 }
 
@@ -201,6 +238,15 @@ tl::expected<UUID, ErrorCode> DataManager::WriteRemoteData(
                    << ", error: " << toString(transfer_result.error());
         timer.LogResponse("error_code=", transfer_result.error());
         return tl::make_unexpected(transfer_result.error());
+    }
+
+    // [P2P_DIAG] Fingerprint received data after transfer, before commit
+    const auto& recv_data = handle->loc.data;
+    if (recv_data.buffer) {
+        void* recv_ptr = reinterpret_cast<void*>(recv_data.buffer->data());
+        LOG(INFO) << "[P2P_DIAG] WRITE_AFTER_TRANSFER key=" << key
+                  << " data_size=" << recv_data.buffer->size()
+                  << " " << DataFingerprint(recv_ptr, recv_data.buffer->size());
     }
 
     // Commit the handle

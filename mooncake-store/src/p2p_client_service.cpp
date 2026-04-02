@@ -9,6 +9,52 @@
 
 namespace mooncake {
 
+namespace {
+
+// Lightweight data fingerprint: XOR of head(32B)/mid(32B)/tail(32B) + first 8B hex
+static std::string DataFingerprint(const void* data, size_t size) {
+    if (!data || size == 0) return "(nil)";
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    uint64_t fp = 0;
+    auto xor_into = [&](const uint8_t* start, size_t len) {
+        for (size_t i = 0; i < len; ++i)
+            fp ^= (uint64_t)start[i] << ((i % 8) * 8);
+    };
+    size_t head = std::min(size, (size_t)32);
+    xor_into(p, head);
+    if (size > 64) xor_into(p + size / 2 - 16, 32);
+    if (size > 32) xor_into(p + size - 32, std::min((size_t)32, size - 32));
+    char hex[64];
+    int pos = 0;
+    for (int i = 0; i < std::min((int)size, 8); ++i)
+        pos += snprintf(hex + pos, sizeof(hex) - pos, "%02x", p[i]);
+    char result[128];
+    snprintf(result, sizeof(result), "fp=0x%016lx head=[%s] size=%zu",
+             (unsigned long)fp, hex, size);
+    return std::string(result);
+}
+
+static std::string SlicesFingerprint(const std::vector<Slice>& slices) {
+    // Compute fingerprint across all slices contiguously
+    size_t total = 0;
+    for (const auto& s : slices) total += s.size;
+    if (total == 0) return DataFingerprint(nullptr, 0);
+    // For simplicity, fingerprint first slice's head and last slice's tail
+    std::string result;
+    const auto& first = slices.front();
+    const auto& last = slices.back();
+    result = "total=" + std::to_string(total) + " first_slice(" +
+             std::to_string(first.size) + "B)=" +
+             DataFingerprint(first.ptr, first.size);
+    if (slices.size() > 1) {
+        result += " last_slice(" + std::to_string(last.size) + "B)=" +
+                  DataFingerprint(last.ptr, last.size);
+    }
+    return result;
+}
+
+}  // namespace
+
 // ============================================================================
 // Construction / Destruction
 // ============================================================================
@@ -450,6 +496,10 @@ tl::expected<void, ErrorCode> P2PClientService::PutViaRoute(
                 buf.size = slice.size;
                 write_req.src_buffers.push_back(buf);
             }
+
+            LOG(INFO) << "[P2P_DIAG] WRITE_SEND key=" << key
+                      << " endpoint=" << endpoint
+                      << " " << SlicesFingerprint(slices);
 
             auto write_result = peer.WriteRemoteData(write_req);
             if (!write_result) {
@@ -908,6 +958,10 @@ tl::expected<void, ErrorCode> P2PClientService::GetRemoteViaRoute(
                 failed_proxies.push_back(proxy);
                 continue;
             } else {
+                LOG(INFO)
+                    << "[P2P_DIAG] READ_RECV key=" << key
+                    << " endpoint=" << endpoint
+                    << " " << SlicesFingerprint(slices);
                 if (!is_cached_proxies && route_cache_) {
                     std::vector<P2PProxyDescriptor> remaining_proxies(
                         proxies.begin() + i, proxies.end());
