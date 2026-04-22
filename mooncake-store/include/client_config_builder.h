@@ -5,6 +5,9 @@
 #include <map>
 #include <memory>
 #include <cstdint>
+#include <algorithm>
+#include <cctype>
+#include <stdexcept>
 
 #include <glog/logging.h>
 #include <json/json.h>
@@ -95,6 +98,15 @@ struct RealClientConfigBase {
     // The IPC socket path between dummy and real clients.
     // If use integrated deployment, this could be empty.
     std::string ipc_socket_path;
+
+    // Port for metrics HTTP server.
+    // Only used when enable_metrics_http is true.
+    uint16_t metrics_port = 9003;
+
+    // Whether to enable metrics HTTP server.
+    // The metrics server exposes /metrics, /metrics/summary, and /health
+    // endpoints.
+    bool enable_metrics_http = true;
 };
 
 /**
@@ -108,6 +120,11 @@ struct CentralizedClientConfig : RealClientConfigBase {
 
     // Whether to enable file storage offloading.
     bool enable_offload = false;
+};
+
+enum class LocalTransferMode {
+    MEMCPY = 0,
+    TE = 1,
 };
 
 /**
@@ -135,6 +152,23 @@ struct P2PClientConfig : RealClientConfigBase {
     // + P2PRouteData(each item is 96B and count is 8B)
     size_t route_cache_max_memory_bytes = 300 * 1024 * 1024;  // 300MB
     uint64_t route_cache_ttl_ms = 5 * 60 * 1000;              // 5min
+
+    // Async route notification.
+    // async_sender_thread_count > 0 enables async notifier.
+    // async_route_queue_size controls queue capacity
+    // (minimum async_max_batch_size * async_sender_thread_count).
+    size_t async_sender_thread_count = 0;
+    size_t async_max_batch_size = 2000;
+    size_t async_route_queue_size = 0;
+
+    // Local transfer mode for P2P local Get/Put path.
+    // - MEMCPY: copy through local CPU memory path
+    // - TE: transfer through local TransferEngine path
+    LocalTransferMode local_transfer_mode = LocalTransferMode::TE;
+
+    // When local_transfer_mode == MEMCPY, the following parameter is used:
+    // 0 means forbid async memcpy (fall back to synchronous).
+    size_t local_memcpy_async_worker_num = 32;
 };
 
 // ============================================================================
@@ -167,12 +201,13 @@ class ClientConfigBuilder {
         uint64_t global_segment_size = 0, uint64_t local_buffer_size = 0,
         const std::shared_ptr<TransferEngine>& transfer_engine = nullptr,
         const std::string& ipc_socket_path = "", bool enable_offload = false,
+        uint16_t metrics_port = 9003, bool enable_metrics_http = true,
         const std::map<std::string, std::string>& labels = {}) {
         CentralizedClientConfig config;
         fill_real_client_config_base(
             config, local_hostname, metadata_connstring, protocol, rdma_devices,
             master_server_entry, local_buffer_size, transfer_engine,
-            ipc_socket_path, labels);
+            ipc_socket_path, metrics_port, enable_metrics_http, labels);
         config.global_segment_size = global_segment_size;
         config.enable_offload = enable_offload;
         return config;
@@ -192,17 +227,31 @@ class ClientConfigBuilder {
         size_t lock_shard_count = 1024,
         size_t route_cache_max_memory_bytes = 300 * 1024 * 1024,
         uint64_t route_cache_ttl_ms = 5 * 60 * 1000,
-        const std::map<std::string, std::string>& labels = {}) {
+        const std::string& local_transfer_mode = "te",
+        size_t local_memcpy_async_worker_num = 32, uint16_t metrics_port = 9003,
+        bool enable_metrics_http = true,
+        const std::map<std::string, std::string>& labels = {},
+        size_t async_sender_thread_count = 0,
+        size_t async_max_batch_size = 2000, size_t async_route_queue_size = 0) {
         P2PClientConfig config;
         fill_real_client_config_base(
             config, local_hostname, metadata_connstring, protocol, rdma_devices,
             master_server_entry, local_buffer_size, transfer_engine,
-            ipc_socket_path, labels);
+            ipc_socket_path, metrics_port, enable_metrics_http, labels);
         config.client_rpc_port = client_rpc_port;
         config.rpc_thread_num = rpc_thread_num;
         config.lock_shard_count = lock_shard_count;
         config.route_cache_max_memory_bytes = route_cache_max_memory_bytes;
         config.route_cache_ttl_ms = route_cache_ttl_ms;
+        config.local_transfer_mode =
+            parse_p2p_local_transfer_mode(local_transfer_mode);
+        if (config.local_transfer_mode == LocalTransferMode::MEMCPY) {
+            config.local_memcpy_async_worker_num =
+                local_memcpy_async_worker_num;
+        }
+        config.async_sender_thread_count = async_sender_thread_count;
+        config.async_max_batch_size = async_max_batch_size;
+        config.async_route_queue_size = async_route_queue_size;
 
         Json::Value tiered_config;
         std::string actual_json = tiered_backend_config_json;
@@ -243,8 +292,9 @@ class ClientConfigBuilder {
         const std::optional<std::string>& rdma_devices,
         const std::string& master_server_entry, uint64_t local_buffer_size,
         const std::shared_ptr<TransferEngine>& transfer_engine,
-        const std::string& ipc_socket_path,
-        const std::map<std::string, std::string>& labels) {
+        const std::string& ipc_socket_path, uint16_t metrics_port = 9003,
+        bool enable_metrics_http = true,
+        const std::map<std::string, std::string>& labels = {}) {
         // Parse local_hostname into IP and optional port.
         // Only set te_port when the user explicitly provides a port;
         // otherwise keep the default value (0 = randomly assigned).
@@ -278,7 +328,23 @@ class ClientConfigBuilder {
         config.local_buffer_size = local_buffer_size;
         config.transfer_engine = transfer_engine;
         config.ipc_socket_path = ipc_socket_path;
+        config.metrics_port = metrics_port;
+        config.enable_metrics_http = enable_metrics_http;
         config.labels = labels;
+    }
+
+    static LocalTransferMode parse_p2p_local_transfer_mode(std::string mode) {
+        std::transform(
+            mode.begin(), mode.end(), mode.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (mode == "memcpy") {
+            return LocalTransferMode::MEMCPY;
+        }
+        if (mode == "te") {
+            return LocalTransferMode::TE;
+        }
+        throw std::runtime_error(
+            "Invalid p2p local transfer mode. Expected 'memcpy' or 'te'.");
     }
 };
 
