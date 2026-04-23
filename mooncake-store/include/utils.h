@@ -130,6 +130,11 @@ void* allocate_buffer_allocator_memory(
 
 void free_memory(const std::string& protocol, void* ptr);
 
+double get_current_rss_mb();
+double get_current_thread_rss_mb();
+long get_current_tid();
+std::string get_rss_snapshot_for_current_thread();
+
 [[nodiscard]] inline std::string byte_size_to_string(uint64_t bytes) {
     const double KB = 1024.0;
     const double MB = KB * 1024.0;

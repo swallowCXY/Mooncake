@@ -179,6 +179,8 @@ template <typename ConfigT>
 tl::expected<void, ErrorCode> RealClient::setup_internal(ConfigT& config) {
     this->protocol = config.protocol;
     this->ipc_socket_path_ = config.ipc_socket_path;
+    LOG(INFO) << "[RSS] RealClient::setup_internal begin "
+              << get_rss_snapshot_for_current_thread();
 
     if (config.te_port == 0) {
         // Create port binder to hold a port
@@ -199,14 +201,22 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(ConfigT& config) {
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
     client_service_ = *client_opt;
+    LOG(INFO) << "[RSS] RealClient::setup_internal after ClientService::Create "
+              << get_rss_snapshot_for_current_thread();
 
     // Local_buffer_size is allowed to be 0 when we use separately deployment.
     // If it is 0, skip registering local memory in real client.
     // Dummy Client can create shm and share it with Real Client.
     // Moreover, invoke ibv_reg_mr() with size=0 is UB, and may
     // fail in some rdma implementations.
+    LOG(INFO)
+        << "[RSS] RealClient::setup_internal before local buffer create "
+        << get_rss_snapshot_for_current_thread();
     client_buffer_allocator_ =
         ClientBufferAllocator::create(config.local_buffer_size, this->protocol);
+    LOG(INFO)
+        << "[RSS] RealClient::setup_internal after local buffer create "
+        << get_rss_snapshot_for_current_thread();
     if (config.local_buffer_size > 0) {
         LOG(INFO) << "Registering local memory: " << config.local_buffer_size
                   << " bytes";
@@ -218,6 +228,8 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(ConfigT& config) {
                        << toString(result.error());
             return tl::unexpected(result.error());
         }
+        LOG(INFO) << "[RSS] RealClient::setup_internal after RegisterLocalMemory "
+                  << get_rss_snapshot_for_current_thread();
     } else {
         LOG(INFO) << "Local buffer size is 0, skip registering local memory";
     }
@@ -235,6 +247,8 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(ConfigT& config) {
         LOG(ERROR) << "Failed to start dummy client monitor";
         return tl::unexpected(ErrorCode::INTERNAL_ERROR);
     }
+    LOG(INFO) << "[RSS] RealClient::setup_internal complete "
+              << get_rss_snapshot_for_current_thread();
     return {};
 }
 

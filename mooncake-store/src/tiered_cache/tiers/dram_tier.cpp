@@ -7,6 +7,7 @@
 #include "tiered_cache/tiered_backend.h"
 #include "tiered_cache/copier_registry.h"
 #include "transfer_engine.h"
+#include "utils.h"
 
 namespace mooncake {
 
@@ -72,11 +73,16 @@ tl::expected<void, ErrorCode> DramCacheTier::Init(TieredBackend* backend,
                                                   TransferEngine* engine) {
     int node = -1;
     std::string location;
+    LOG(INFO) << "[RSS] DramCacheTier::Init begin tier_id=" << tier_id_
+              << ", capacity=" << capacity_ << ", "
+              << get_rss_snapshot_for_current_thread();
 
     backend_ = backend;
     if (engine != nullptr) engine_ = engine;
 
     // Allocate a contiguous memory block.
+    LOG(INFO) << "[RSS] DramCacheTier::Init before buffer allocation tier_id="
+              << tier_id_ << ", " << get_rss_snapshot_for_current_thread();
     if (numa_node_.has_value()) {
         if (numa_available() < 0) {
             LOG(ERROR) << "NUMA not available on this system.";
@@ -111,6 +117,8 @@ tl::expected<void, ErrorCode> DramCacheTier::Init(TieredBackend* backend,
         LOG(INFO) << "Allocated " << capacity_ << " bytes for DramCacheTier "
                   << tier_id_;
     }
+    LOG(INFO) << "[RSS] DramCacheTier::Init after buffer allocation tier_id="
+              << tier_id_ << ", " << get_rss_snapshot_for_current_thread();
     char* mem_ptr = memory_buffer_.get();
 
     // Register this newly allocated memory with the TransferEngine.
@@ -120,6 +128,9 @@ tl::expected<void, ErrorCode> DramCacheTier::Init(TieredBackend* backend,
         } else {
             location = kWildcardLocation;
         }
+        LOG(INFO)
+            << "[RSS] DramCacheTier::Init before registerLocalMemory tier_id="
+            << tier_id_ << ", " << get_rss_snapshot_for_current_thread();
         int rc = engine_->registerLocalMemory(mem_ptr, capacity_, location);
         if (rc != 0) {
             LOG(ERROR) << "Failed to register memory with TransferEngine for "
@@ -130,6 +141,9 @@ tl::expected<void, ErrorCode> DramCacheTier::Init(TieredBackend* backend,
             LOG(INFO)
                 << "registered memory with TransferEngine for DramCacheTier "
                 << tier_id_ << " at " << static_cast<void*>(mem_ptr);
+            LOG(INFO)
+                << "[RSS] DramCacheTier::Init after registerLocalMemory tier_id="
+                << tier_id_ << ", " << get_rss_snapshot_for_current_thread();
         }
     }
 
@@ -159,6 +173,8 @@ tl::expected<void, ErrorCode> DramCacheTier::Init(TieredBackend* backend,
     LOG(INFO) << "DramCacheTier " << tier_id_ << " initialized and registered "
               << capacity_ << " bytes at base address 0x" << std::hex
               << base_address;
+    LOG(INFO) << "[RSS] DramCacheTier::Init complete tier_id=" << tier_id_
+              << ", " << get_rss_snapshot_for_current_thread();
     return tl::expected<void, ErrorCode>{};
 }
 

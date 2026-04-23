@@ -12,6 +12,7 @@
 #include <async_simple/Try.h>
 #include <async_simple/coro/Lazy.h>
 
+#include "utils.h"
 #include "utils/scoped_vlog_timer.h"
 
 namespace mooncake {
@@ -93,15 +94,23 @@ P2PClientService::~P2PClientService() {
 
 ErrorCode P2PClientService::Init(const P2PClientConfig& config) {
     client_rpc_port_ = config.client_rpc_port;
+    LOG(INFO) << "[RSS] P2PClientService::Init begin "
+              << get_rss_snapshot_for_current_thread();
 
     // 1. Connect to master
+    LOG(INFO) << "[RSS] P2PClientService::Init before ConnectToMaster "
+              << get_rss_snapshot_for_current_thread();
     ErrorCode err = ConnectToMaster(config.master_server_entry);
     if (err != ErrorCode::OK) {
         LOG(ERROR) << "Failed to connect to master in P2P mode";
         return err;
     }
+    LOG(INFO) << "[RSS] P2PClientService::Init after ConnectToMaster "
+              << get_rss_snapshot_for_current_thread();
 
     // 2. Initialize transfer engine
+    LOG(INFO) << "[RSS] P2PClientService::Init before transfer engine init "
+              << get_rss_snapshot_for_current_thread();
     if (config.transfer_engine == nullptr) {
         transfer_engine_ = std::make_shared<TransferEngine>();
         err = InitTransferEngine(local_endpoint(), metadata_connstring_,
@@ -115,29 +124,45 @@ ErrorCode P2PClientService::Init(const P2PClientConfig& config) {
         LOG(INFO) << "Use existing transfer engine instance. Skip its "
                      "initialization.";
     }
+    LOG(INFO) << "[RSS] P2PClientService::Init after transfer engine init "
+              << get_rss_snapshot_for_current_thread();
     initTeEndpoint();
+    LOG(INFO) << "[RSS] P2PClientService::Init after initTeEndpoint "
+              << get_rss_snapshot_for_current_thread();
 
     // 3. Register with master BEFORE InitStorage, because InitStorage
     //    triggers TieredBackend::MountSegment which requires the client to
     //    be already registered on the master side.
+    LOG(INFO) << "[RSS] P2PClientService::Init before RegisterClient "
+              << get_rss_snapshot_for_current_thread();
     auto reg = RegisterClient();
     if (!reg) {
         LOG(ERROR) << "Failed to register P2P client with master";
         return reg.error();
     }
+    LOG(INFO) << "[RSS] P2PClientService::Init after RegisterClient "
+              << get_rss_snapshot_for_current_thread();
 
     // 3.5. Start heartbeat immediately after registration so master does not
     //      consider this client disconnected during a lengthy InitStorage.
     //      build_heartbeat_request() and OnHAEvent() both guard against
     //      uninitialized data_manager_ / ha_manager_, so this is safe.
+    LOG(INFO) << "[RSS] P2PClientService::Init before StartHeartbeat "
+              << get_rss_snapshot_for_current_thread();
     StartHeartbeat(config.master_server_entry);
+    LOG(INFO) << "[RSS] P2PClientService::Init after StartHeartbeat "
+              << get_rss_snapshot_for_current_thread();
 
     // 4. Initialize TieredBackend + DataManager
+    LOG(INFO) << "[RSS] P2PClientService::Init before InitStorage "
+              << get_rss_snapshot_for_current_thread();
     err = InitStorage(config);
     if (err != ErrorCode::OK) {
         LOG(ERROR) << "Failed to initialize TieredBackend";
         return err;
     }
+    LOG(INFO) << "[RSS] P2PClientService::Init after InitStorage "
+              << get_rss_snapshot_for_current_thread();
 
     // 4.5. Initialize async route notifier if enabled
     if (config.async_sender_thread_count > 0) {
@@ -164,13 +189,23 @@ ErrorCode P2PClientService::Init(const P2PClientConfig& config) {
         LOG(INFO) << "Async route notifier enabled, thread_count="
                   << config.async_sender_thread_count
                   << ", queue_size=" << config.async_route_queue_size;
+        LOG(INFO)
+            << "[RSS] P2PClientService::Init after async route notifier "
+            << get_rss_snapshot_for_current_thread();
     }
+    LOG(INFO)
+        << "[RSS] P2PClientService::Init after async route notifier section "
+        << get_rss_snapshot_for_current_thread();
 
     // 5. Start P2P client RPC service
+    LOG(INFO) << "[RSS] P2PClientService::Init before RPC service setup "
+              << get_rss_snapshot_for_current_thread();
     client_rpc_service_.emplace(*data_manager_);
     client_rpc_server_ = std::make_unique<coro_rpc::coro_rpc_server>(
         config.rpc_thread_num, client_rpc_port_);
     RegisterClientRpcService(*client_rpc_server_, *client_rpc_service_);
+    LOG(INFO) << "[RSS] P2PClientService::Init after RPC service setup "
+              << get_rss_snapshot_for_current_thread();
 
     client_rpc_server_thread_ = std::thread([this]() {
         auto ec = client_rpc_server_->start();
@@ -179,30 +214,46 @@ ErrorCode P2PClientService::Init(const P2PClientConfig& config) {
                        << client_rpc_port_ << ": " << ec.message();
         }
     });
+    LOG(INFO) << "[RSS] P2PClientService::Init after RPC thread launch "
+              << get_rss_snapshot_for_current_thread();
 
     is_running_ = true;
+    LOG(INFO) << "[RSS] P2PClientService::Init after set is_running "
+              << get_rss_snapshot_for_current_thread();
 
     // Give RPC server a moment to start
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     LOG(INFO) << "P2P RPC server started on port " << client_rpc_port_;
+    LOG(INFO) << "[RSS] P2PClientService::Init after RPC server start "
+              << get_rss_snapshot_for_current_thread();
 
     // 6. Initialize HA recovery manager
+    LOG(INFO) << "[RSS] P2PClientService::Init before HA manager init "
+              << get_rss_snapshot_for_current_thread();
     ha_manager_ = std::make_unique<HARecoveryManager>(
         client_id_, master_client_, data_manager_, async_route_notifier_,
         view_version_);
     // First-time registration: no keys to sync, clear is_syncing_ on Master
     ha_manager_->SetSyncCompleted();
+    LOG(INFO) << "[RSS] P2PClientService::Init after HA manager init "
+              << get_rss_snapshot_for_current_thread();
+    LOG(INFO) << "[RSS] P2PClientService::Init complete "
+              << get_rss_snapshot_for_current_thread();
 
     return ErrorCode::OK;
 }
 
 ErrorCode P2PClientService::InitStorage(const P2PClientConfig& config) {
+    LOG(INFO) << "[RSS] P2PClientService::InitStorage begin "
+              << get_rss_snapshot_for_current_thread();
     auto tiered_backend = std::make_unique<TieredBackend>();
 
     auto add_replica_callback = BuildAddReplicaCallback();
     auto remove_replica_callback = BuildRemoveReplicaCallback();
     auto segment_sync_callback = BuildSegmentSyncCallback();
 
+    LOG(INFO) << "[RSS] P2PClientService::InitStorage before TieredBackend::Init "
+              << get_rss_snapshot_for_current_thread();
     auto init_result = tiered_backend->Init(
         config.tiered_backend_config, transfer_engine_.get(),
         add_replica_callback, remove_replica_callback, segment_sync_callback);
@@ -210,6 +261,8 @@ ErrorCode P2PClientService::InitStorage(const P2PClientConfig& config) {
         LOG(ERROR) << "Failed to init TieredBackend: " << init_result.error();
         return init_result.error();
     }
+    LOG(INFO) << "[RSS] P2PClientService::InitStorage after TieredBackend::Init "
+              << get_rss_snapshot_for_current_thread();
 
     LocalTransferConfig local_transfer_config;
     local_transfer_config.mode = config.local_transfer_mode;
@@ -220,8 +273,12 @@ ErrorCode P2PClientService::InitStorage(const P2PClientConfig& config) {
             config.local_memcpy_async_worker_num;
     }
 
+    LOG(INFO) << "[RSS] P2PClientService::InitStorage before DataManager init "
+              << get_rss_snapshot_for_current_thread();
     data_manager_ = DataManager(std::move(tiered_backend), transfer_engine_,
                                 config.lock_shard_count, local_transfer_config);
+    LOG(INFO) << "[RSS] P2PClientService::InitStorage after DataManager init "
+              << get_rss_snapshot_for_current_thread();
     // Set rectify callback on DataManager to remove stale replicas from master
     data_manager_->SetRectifyCallback([this](const std::string& key,
                                              std::optional<UUID> tier_id) {

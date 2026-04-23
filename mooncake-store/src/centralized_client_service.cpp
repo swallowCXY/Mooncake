@@ -16,6 +16,7 @@
 #include "config.h"
 #include "types.h"
 #include "file_storage.h"
+#include "utils.h"
 
 namespace mooncake {
 
@@ -79,13 +80,23 @@ void CentralizedClientService::Destroy() {
 ErrorCode CentralizedClientService::Init(
     const CentralizedClientConfig& config) {
     auto master_server_entry = config.master_server_entry;
+    LOG(INFO) << "[RSS] CentralizedClientService::Init begin "
+              << get_rss_snapshot_for_current_thread();
+    LOG(INFO)
+        << "[RSS] CentralizedClientService::Init before ConnectToMaster "
+        << get_rss_snapshot_for_current_thread();
     ErrorCode err = ConnectToMaster(master_server_entry);
     if (err != ErrorCode::OK) {
         LOG(ERROR) << "Failed to connect to master: " << err;
         return err;
     }
+    LOG(INFO)
+        << "[RSS] CentralizedClientService::Init after ConnectToMaster "
+        << get_rss_snapshot_for_current_thread();
 
     // Initialize storage backend if storage_root_dir is valid
+    LOG(INFO) << "[RSS] CentralizedClientService::Init before storage backend "
+              << "discovery/init " << get_rss_snapshot_for_current_thread();
     auto config_response = master_client_.GetStorageConfig();
     if (!config_response) {
         LOG(ERROR) << "Failed to get storage config from master";
@@ -137,8 +148,13 @@ ErrorCode CentralizedClientService::Init(
             }
         }
     }
+    LOG(INFO) << "[RSS] CentralizedClientService::Init after storage backend "
+              << "discovery/init " << get_rss_snapshot_for_current_thread();
 
     // Initialize transfer engine
+    LOG(INFO)
+        << "[RSS] CentralizedClientService::Init before transfer engine init "
+        << get_rss_snapshot_for_current_thread();
     if (config.transfer_engine == nullptr) {
         transfer_engine_ = std::make_shared<TransferEngine>();
         err = InitTransferEngine(local_endpoint(), metadata_connstring_,
@@ -152,20 +168,41 @@ ErrorCode CentralizedClientService::Init(
         LOG(INFO) << "Use existing transfer engine instance. Skip its "
                      "initialization.";
     }
+    LOG(INFO)
+        << "[RSS] CentralizedClientService::Init after transfer engine init "
+        << get_rss_snapshot_for_current_thread();
     initTeEndpoint();
+    LOG(INFO)
+        << "[RSS] CentralizedClientService::Init after initTeEndpoint "
+        << get_rss_snapshot_for_current_thread();
 
+    LOG(INFO) << "[RSS] CentralizedClientService::Init before InitTransferSubmitter "
+              << get_rss_snapshot_for_current_thread();
     InitTransferSubmitter();
+    LOG(INFO) << "[RSS] CentralizedClientService::Init after InitTransferSubmitter "
+              << get_rss_snapshot_for_current_thread();
 
     is_running_ = true;
+    LOG(INFO)
+        << "[RSS] CentralizedClientService::Init after set is_running "
+        << get_rss_snapshot_for_current_thread();
 
+    LOG(INFO)
+        << "[RSS] CentralizedClientService::Init before RegisterClient "
+        << get_rss_snapshot_for_current_thread();
     auto reg = RegisterClient();
     if (!reg) {
         LOG(ERROR) << "Failed to register centralized client with master: "
                    << toString(reg.error());
         return reg.error();
     }
+    LOG(INFO)
+        << "[RSS] CentralizedClientService::Init after RegisterClient "
+        << get_rss_snapshot_for_current_thread();
 
     // Mount global segments if specified
+    LOG(INFO) << "[RSS] CentralizedClientService::Init before global segment mount "
+              << get_rss_snapshot_for_current_thread();
     if (config.global_segment_size > 0) {
         // If global_segment_size > max_mr_size, split to multiple mapped_shms.
         auto max_mr_size = globalConfig().max_mr_size;  // Max segment size
@@ -180,29 +217,48 @@ ErrorCode CentralizedClientService::Init(
             current_glbseg_size += segment_size;
             LOG(INFO) << "Mounting segment: " << segment_size << " bytes, "
                       << current_glbseg_size << " of " << total_glbseg_size;
+            LOG(INFO) << "[RSS] CentralizedClientService::Init before segment alloc "
+                      << "mounted=" << current_glbseg_size - segment_size
+                      << ", segment_size=" << segment_size
+                      << ", " << get_rss_snapshot_for_current_thread();
             void* ptr =
                 allocate_buffer_allocator_memory(segment_size, config.protocol);
             if (!ptr) {
                 LOG(ERROR) << "Failed to allocate segment memory";
                 return ErrorCode::INTERNAL_ERROR;
             }
+            LOG(INFO) << "[RSS] CentralizedClientService::Init after segment alloc "
+                      << "mounted=" << current_glbseg_size
+                      << ", " << get_rss_snapshot_for_current_thread();
             if (config.protocol == "ascend") {
                 ascend_segment_ptrs_.emplace_back(ptr);
             } else {
                 segment_ptrs_.emplace_back(ptr);
             }
+            LOG(INFO)
+                << "[RSS] CentralizedClientService::Init before MountSegment "
+                << "mounted=" << current_glbseg_size
+                << ", " << get_rss_snapshot_for_current_thread();
             auto mount_result = MountSegment(ptr, segment_size);
             if (!mount_result.has_value()) {
                 LOG(ERROR) << "Failed to mount segment: "
                            << toString(mount_result.error());
                 return mount_result.error();
             }
+            LOG(INFO)
+                << "[RSS] CentralizedClientService::Init after MountSegment "
+                << "mounted=" << current_glbseg_size
+                << ", " << get_rss_snapshot_for_current_thread();
         }
     } else {
         LOG(INFO) << "Global segment size is 0, skip mounting segment";
     }
+    LOG(INFO) << "[RSS] CentralizedClientService::Init after global segment mount "
+              << get_rss_snapshot_for_current_thread();
 
     // Initialize file storage if enabled
+    LOG(INFO) << "[RSS] CentralizedClientService::Init before file storage section "
+              << get_rss_snapshot_for_current_thread();
     if (config.enable_offload) {
         auto file_storage_config = FileStorageConfig::FromEnvironment();
         file_storage_ = std::make_shared<FileStorage>(
@@ -214,9 +270,19 @@ ErrorCode CentralizedClientService::Init(
             return init_result.error();
         }
     }
+    LOG(INFO) << "[RSS] CentralizedClientService::Init after file storage section "
+              << get_rss_snapshot_for_current_thread();
 
     // Start heartbeat AFTER all initialization is complete
+    LOG(INFO)
+        << "[RSS] CentralizedClientService::Init before StartHeartbeat "
+        << get_rss_snapshot_for_current_thread();
     StartHeartbeat(master_server_entry);
+    LOG(INFO)
+        << "[RSS] CentralizedClientService::Init after StartHeartbeat "
+        << get_rss_snapshot_for_current_thread();
+    LOG(INFO) << "[RSS] CentralizedClientService::Init complete "
+              << get_rss_snapshot_for_current_thread();
 
     return ErrorCode::OK;
 }

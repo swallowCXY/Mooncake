@@ -3,6 +3,8 @@
 #include <cstring>
 #include <algorithm>
 
+#include "utils.h"
+
 namespace mooncake {
 
 size_t P2PRouteData::Serialize(
@@ -33,6 +35,10 @@ size_t P2PRouteData::Serialize(
 
 RouteCache::RouteCache(size_t max_memory_bytes, uint64_t ttl_ms)
     : max_memory_bytes_(max_memory_bytes), ttl_ms_(ttl_ms) {
+    const auto ctor_start = std::chrono::steady_clock::now();
+    LOG(INFO) << "[RSS] RouteCache::RouteCache begin max_memory_bytes="
+              << max_memory_bytes_ << ", "
+              << get_rss_snapshot_for_current_thread();
     // 1. Determine shard_count (adaptive to concurrency and memory)
     size_t hw = std::thread::hardware_concurrency();
     shard_count_ = std::clamp((size_t)(hw * 4), (size_t)8, (size_t)1024);
@@ -55,36 +61,79 @@ RouteCache::RouteCache(size_t max_memory_bytes, uint64_t ttl_ms)
     LOG(INFO) << "RouteCache: Initializing with " << shard_count_ << " shards"
               << ", nodes in per shard:" << nodes_per_shard_
               << ", metadata cost:" << metadata_cost
-              << ", cache data cost:" << max_memory_bytes_;
+              << ", cache data cost:" << max_memory_bytes_
+              << ", per_shard_bytes="
+              << (shard_count_ > 0 ? (max_memory_bytes_ / shard_count_) : 0)
+              << ", sizeof(Node)=" << sizeof(Node)
+              << ", sizeof(bucket)=" << sizeof(std::atomic<Node*>)
+              << ", total_estimated_nodes=" << total_estimated_nodes;
 
     for (size_t i = 0; i < shard_count_; ++i) {
         shards_.push_back(std::make_unique<Shard>());
     }
 
+    LOG(INFO) << "[RSS] RouteCache::RouteCache before base allocation "
+              << get_rss_snapshot_for_current_thread();
     base_all_ = std::malloc(max_memory_bytes_);
     if (!base_all_) {
         throw std::runtime_error(
             "Failed to allocate master memory for RouteCache");
     }
+    LOG(INFO) << "[RSS] RouteCache::RouteCache after base allocation "
+              << get_rss_snapshot_for_current_thread();
 
     size_t per_shard_bytes = max_memory_bytes_ / shard_count_;
+    auto should_log_shard = [this](size_t shard_idx) {
+        return shard_idx < 4 || shard_idx + 1 == shard_count_ ||
+               ((shard_idx + 1) % 64 == 0);
+    };
+    auto log_shard_stage = [&](const char* stage, size_t shard_idx) {
+        if (!should_log_shard(shard_idx)) {
+            return;
+        }
+        const auto elapsed_ms = std::chrono::duration_cast<
+            std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                       ctor_start)
+                                    .count();
+        LOG(INFO) << "[RSS] RouteCache::RouteCache shard_stage=" << stage
+                  << ", shard=" << shard_idx + 1 << "/" << shard_count_
+                  << ", per_shard_bytes=" << per_shard_bytes
+                  << ", buckets_per_shard=" << buckets_per_shard_
+                  << ", nodes_per_shard=" << nodes_per_shard_
+                  << ", elapsed_ms=" << elapsed_ms << ", "
+                  << get_rss_snapshot_for_current_thread();
+    };
     for (size_t i = 0; i < shard_count_; ++i) {
         auto& shard = *shards_[i];
         shard.base_addr_ = static_cast<char*>(base_all_) + i * per_shard_bytes;
+        log_shard_stage("before_allocator_create", i);
         shard.allocator_ = offset_allocator::OffsetAllocator::create(
-            reinterpret_cast<uintptr_t>(shard.base_addr_), per_shard_bytes);
+            reinterpret_cast<uintptr_t>(shard.base_addr_), per_shard_bytes, nodes_per_shard_, 2*nodes_per_shard_);
+        log_shard_stage("after_allocator_create", i);
 
         shard.buckets_ =
             std::make_unique<std::atomic<Node*>[]>(buckets_per_shard_);
+        log_shard_stage("after_buckets_alloc", i);
 
         // Initialize Node memory pool
         shard.nodes_.Init(nodes_per_shard_);
+        log_shard_stage("after_nodes_init", i);
     }
 
     // Initialize EBR reader slots
+    LOG(INFO) << "[RSS] RouteCache::RouteCache before reader_slots alloc "
+              << get_rss_snapshot_for_current_thread();
     reader_slots_ = std::make_unique<ReaderSlot[]>(MAX_READER_SLOTS);
+    LOG(INFO) << "[RSS] RouteCache::RouteCache after reader_slots alloc "
+              << get_rss_snapshot_for_current_thread();
 
+    LOG(INFO) << "[RSS] RouteCache::RouteCache before gc_thread start "
+              << get_rss_snapshot_for_current_thread();
     gc_thread_ = std::thread(&RouteCache::GCLoop, this);
+    LOG(INFO) << "[RSS] RouteCache::RouteCache after gc_thread start "
+              << get_rss_snapshot_for_current_thread();
+    LOG(INFO) << "[RSS] RouteCache::RouteCache complete "
+              << get_rss_snapshot_for_current_thread();
 }
 
 RouteCache::~RouteCache() {

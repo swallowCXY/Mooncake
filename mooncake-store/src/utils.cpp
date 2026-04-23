@@ -1,8 +1,12 @@
 #include "utils.h"
 
 #include <Slab.h>
+#include <cstring>
+#include <cstdio>
 #include <glog/logging.h>
 #include <netinet/in.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <boost/algorithm/string.hpp>
@@ -15,6 +19,86 @@
 #include <ylt/coro_http/coro_http_client.hpp>
 
 namespace mooncake {
+
+namespace {
+
+double read_proc_kb_field_mb(const std::string& path, const char* field_prefix) {
+    FILE* fp = std::fopen(path.c_str(), "r");
+    if (fp == nullptr) {
+        return -1.0;
+    }
+    const size_t prefix_len = std::strlen(field_prefix);
+    char line[512];
+    while (std::fgets(line, sizeof(line), fp) != nullptr) {
+        if (std::strncmp(line, field_prefix, prefix_len) == 0) {
+            long value_kb = 0;
+            if (std::sscanf(line + prefix_len, " %ld kB", &value_kb) == 1) {
+                std::fclose(fp);
+                return static_cast<double>(value_kb) / 1024.0;
+            }
+        }
+    }
+    std::fclose(fp);
+    return -1.0;
+}
+
+std::string build_linux_memory_snapshot() {
+    std::ostringstream oss;
+    const auto pid = static_cast<long>(::getpid());
+    const auto tid = get_current_tid();
+    const std::string proc_status_path = "/proc/self/status";
+    const std::string task_status_path =
+        (tid > 0)
+            ? ("/proc/self/task/" + std::to_string(tid) + "/status")
+            : std::string();
+    const std::string smaps_rollup_path = "/proc/self/smaps_rollup";
+
+    struct rusage usage {};
+    long minflt = -1;
+    long majflt = -1;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        minflt = usage.ru_minflt;
+        majflt = usage.ru_majflt;
+    }
+
+    oss << "pid=" << pid << ", tid=" << tid
+        << ", rss_mb=" << get_current_rss_mb()
+        << ", vmrss_mb="
+        << read_proc_kb_field_mb(proc_status_path, "VmRSS:")
+        << ", vmhwm_mb="
+        << read_proc_kb_field_mb(proc_status_path, "VmHWM:")
+        << ", rss_anon_mb="
+        << read_proc_kb_field_mb(proc_status_path, "RssAnon:")
+        << ", rss_file_mb="
+        << read_proc_kb_field_mb(proc_status_path, "RssFile:")
+        << ", rss_shmem_mb="
+        << read_proc_kb_field_mb(proc_status_path, "RssShmem:");
+
+    if (!task_status_path.empty()) {
+        oss << ", task_vmrss_mb="
+            << read_proc_kb_field_mb(task_status_path, "VmRSS:")
+            << ", task_vmhwm_mb="
+            << read_proc_kb_field_mb(task_status_path, "VmHWM:");
+    }
+
+    oss << ", smaps_rss_mb="
+        << read_proc_kb_field_mb(smaps_rollup_path, "Rss:")
+        << ", smaps_pss_mb="
+        << read_proc_kb_field_mb(smaps_rollup_path, "Pss:")
+        << ", smaps_anon_mb="
+        << read_proc_kb_field_mb(smaps_rollup_path, "Anonymous:")
+        << ", smaps_private_dirty_mb="
+        << read_proc_kb_field_mb(smaps_rollup_path, "Private_Dirty:")
+        << ", smaps_shared_clean_mb="
+        << read_proc_kb_field_mb(smaps_rollup_path, "Shared_Clean:")
+        << ", smaps_anon_huge_mb="
+        << read_proc_kb_field_mb(smaps_rollup_path, "AnonHugePages:")
+        << ", minflt=" << minflt
+        << ", majflt=" << majflt;
+    return oss.str();
+}
+
+}  // namespace
 
 bool isPortAvailable(int port) {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -100,6 +184,68 @@ void free_memory(const std::string &protocol, void *ptr) {
     }
 #endif
     free(ptr);
+}
+
+double get_current_rss_mb() {
+#if defined(__linux__)
+    long rss_pages = 0;
+    FILE* statm = std::fopen("/proc/self/statm", "r");
+    if (statm != nullptr) {
+        if (std::fscanf(statm, "%*ld %ld", &rss_pages) == 1 &&
+            rss_pages >= 0) {
+            const long page_size = sysconf(_SC_PAGESIZE);
+            std::fclose(statm);
+            if (page_size > 0) {
+                return static_cast<double>(rss_pages) * page_size /
+                       (1024.0 * 1024.0);
+            }
+        } else {
+            std::fclose(statm);
+        }
+    }
+#endif
+
+    struct rusage usage {};
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+#if defined(__APPLE__)
+        return static_cast<double>(usage.ru_maxrss) / (1024.0 * 1024.0);
+#else
+        return static_cast<double>(usage.ru_maxrss) / 1024.0;
+#endif
+    }
+    return -1.0;
+}
+
+long get_current_tid() {
+#if defined(__linux__)
+    return static_cast<long>(::syscall(SYS_gettid));
+#else
+    return -1;
+#endif
+}
+
+double get_current_thread_rss_mb() {
+#if defined(__linux__)
+    const long tid = get_current_tid();
+    if (tid > 0) {
+        const std::string status_path =
+            "/proc/self/task/" + std::to_string(tid) + "/status";
+        return read_proc_kb_field_mb(status_path, "VmRSS:");
+    }
+#endif
+    return -1.0;
+}
+
+std::string get_rss_snapshot_for_current_thread() {
+#if defined(__linux__)
+    return build_linux_memory_snapshot();
+#else
+    std::ostringstream oss;
+    oss << "pid=" << static_cast<long>(::getpid())
+        << ", tid=" << get_current_tid()
+        << ", rss_mb=" << get_current_rss_mb();
+    return oss.str();
+#endif
 }
 
 std::string formatDeviceNames(const std::string &device_names) {

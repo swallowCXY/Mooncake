@@ -11,6 +11,7 @@
 #endif
 #include "tiered_cache/tiers/storage_tier.h"
 #include "tiered_cache/scheduler/client_scheduler.h"
+#include "utils.h"
 
 namespace mooncake {
 
@@ -88,6 +89,8 @@ tl::expected<void, ErrorCode> TieredBackend::Init(
     AddReplicaCallback add_replica_callback,
     RemoveReplicaCallback remove_replica_callback,
     SegmentSyncCallback segment_sync_callback) {
+    LOG(INFO) << "[RSS] TieredBackend::Init begin "
+              << get_rss_snapshot_for_current_thread();
     // Initialize DataCopier
     try {
         DataCopierBuilder builder;
@@ -178,6 +181,9 @@ tl::expected<void, ErrorCode> TieredBackend::Init(
                       << (numa_node.has_value()
                               ? ", numa_node=" + std::to_string(*numa_node)
                               : "");
+            LOG(INFO) << "[RSS] TieredBackend::Init before DRAM tier init id="
+                      << id << ", capacity=" << capacity << ", "
+                      << get_rss_snapshot_for_current_thread();
 
             auto tier = std::make_shared<DramCacheTier>(
                 id, capacity, tags, numa_node, allocator_type);
@@ -192,6 +198,8 @@ tl::expected<void, ErrorCode> TieredBackend::Init(
             tier_info_[id] = {priority, tags};
             memory_type = MemoryType::DRAM;
             LOG(INFO) << "Successfully initialized DRAM tier: id=" << id;
+            LOG(INFO) << "[RSS] TieredBackend::Init after DRAM tier init id="
+                      << id << ", " << get_rss_snapshot_for_current_thread();
         }
 #ifdef USE_ASCEND_CACHE_TIER
         else if (type == "ASCEND_NPU" || type == "ASCEND") {
@@ -204,6 +212,10 @@ tl::expected<void, ErrorCode> TieredBackend::Init(
             LOG(INFO) << "Creating ASCEND_NPU tier: id=" << id
                       << ", capacity=" << capacity << ", priority=" << priority
                       << ", device_id=" << device_id;
+            LOG(INFO)
+                << "[RSS] TieredBackend::Init before ASCEND tier init id=" << id
+                << ", capacity=" << capacity << ", "
+                << get_rss_snapshot_for_current_thread();
 
             auto tier = std::make_shared<AscendCacheTier>(id, capacity, tags,
                                                           device_id);
@@ -218,11 +230,16 @@ tl::expected<void, ErrorCode> TieredBackend::Init(
             tier_info_[id] = {priority, tags};
             memory_type = MemoryType::ASCEND_NPU;
             LOG(INFO) << "Successfully initialized ASCEND_NPU tier: id=" << id;
+            LOG(INFO) << "[RSS] TieredBackend::Init after ASCEND tier init id="
+                      << id << ", " << get_rss_snapshot_for_current_thread();
         }
 #endif
         else if (type == "STORAGE" || type == "DISK") {
             LOG(INFO) << "Creating Storage tier: id=" << id
                       << ", capacity=" << capacity << ", priority=" << priority;
+            LOG(INFO) << "[RSS] TieredBackend::Init before STORAGE tier init id="
+                      << id << ", capacity=" << capacity << ", "
+                      << get_rss_snapshot_for_current_thread();
             auto tier = std::make_shared<StorageTier>(id, tags, capacity);
             auto init_result = tier->Init(this, engine);
             if (!init_result) {
@@ -234,11 +251,15 @@ tl::expected<void, ErrorCode> TieredBackend::Init(
             tier_info_[id] = {priority, tags};
             memory_type = MemoryType::NVME;
             LOG(INFO) << "Successfully initialized Storage tier: id=" << id;
+            LOG(INFO) << "[RSS] TieredBackend::Init after STORAGE tier init id="
+                      << id << ", " << get_rss_snapshot_for_current_thread();
         } else {
             LOG(ERROR) << "Unsupported tier type '" << type << "'";
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
         }
 
+        LOG(INFO) << "[RSS] TieredBackend::Init before MountSegment id=" << id
+                  << ", " << get_rss_snapshot_for_current_thread();
         auto mount_result =
             MountSegment(id, capacity, priority, tags, memory_type);
         if (!mount_result) {
@@ -246,14 +267,20 @@ tl::expected<void, ErrorCode> TieredBackend::Init(
                        << ", error=" << mount_result.error();
             return mount_result;
         }
+        LOG(INFO) << "[RSS] TieredBackend::Init after MountSegment id=" << id
+                  << ", " << get_rss_snapshot_for_current_thread();
     }
 
     // Initialize and Start Scheduler
+    LOG(INFO) << "[RSS] TieredBackend::Init before scheduler start "
+              << get_rss_snapshot_for_current_thread();
     scheduler_ = std::make_unique<ClientScheduler>(this, root);
     for (const auto& [id, tier] : tiers_) {
         scheduler_->RegisterTier(tier.get());
     }
     scheduler_->Start();
+    LOG(INFO) << "[RSS] TieredBackend::Init after scheduler start "
+              << get_rss_snapshot_for_current_thread();
 
     LOG(INFO) << "TieredBackend initialized successfully with "
               << tier_info_.size() << " tiers.";
