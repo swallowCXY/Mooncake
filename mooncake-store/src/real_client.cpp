@@ -293,38 +293,6 @@ tl::expected<void, ErrorCode> RealClient::setup_ascend_internal(
     return {};
 }
 
-tl::expected<void, ErrorCode> RealClient::setup_internal(
-    const std::string &local_hostname, const std::string &metadata_server,
-    size_t global_segment_size, size_t local_buffer_size,
-    const std::string &protocol, const std::string &rdma_devices,
-    const std::string &master_server_addr,
-    const std::shared_ptr<TransferEngine> &transfer_engine,
-    const std::string &ipc_socket_path, int local_rpc_port,
-    bool enable_offload) {
-    this->protocol = protocol;
-    this->ipc_socket_path_ = ipc_socket_path;
-    const bool should_use_hugepage = use_hugepage_ &&
-                                     this->protocol != "ascend" &&
-                                     this->protocol != "ubshmem";
-#ifdef USE_ASCEND_DIRECT
-    if (protocol == "ascend" && globalConfig().ascend_agent_mode) {
-        auto ascend_setup = setup_ascend_internal(local_buffer_size);
-        if (!ascend_setup) return ascend_setup;
-        if (!ContextManager::getInstance().setCurrentContext(0)) {
-            LOG(ERROR) << "Failed to set current context for device " << 0;
-            return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
-        }
-    }
-#endif
-
-// Explicit template instantiations
-template tl::expected<void, ErrorCode> RealClient::setup_internal(
-    CentralizedClientConfig&);
-template tl::expected<void, ErrorCode> RealClient::setup_internal(
-    P2PClientConfig&);
-template int RealClient::setup(CentralizedClientConfig&);
-template int RealClient::setup(P2PClientConfig&);
-
 template <typename ConfigT>
 tl::expected<void, ErrorCode> RealClient::setup_internal(ConfigT& config) {
     this->protocol = config.protocol;
@@ -2111,5 +2079,13 @@ RealClient::batch_get_replica_desc(const std::vector<std::string>& keys) {
     }
     return replica_map;
 }
+
+// Explicit template instantiations
+template tl::expected<void, ErrorCode> RealClient::setup_internal(
+    CentralizedClientConfig&);
+template tl::expected<void, ErrorCode> RealClient::setup_internal(
+    P2PClientConfig&);
+template int RealClient::setup(CentralizedClientConfig&);
+template int RealClient::setup(P2PClientConfig&);
 
 }  // namespace mooncake
