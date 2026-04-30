@@ -1001,7 +1001,7 @@ tl::expected<void, ErrorCode> RealClient::ascend_ipc_shm_internal(
     const UUID &client_id) {
 #ifdef USE_ASCEND_DIRECT
     constexpr size_t kIPCKeyLen = 65;
-    if (!client_) {
+    if (!client_service_) {
         LOG(ERROR) << "Client is not initialized";
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
