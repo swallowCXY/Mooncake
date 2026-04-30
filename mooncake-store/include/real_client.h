@@ -17,6 +17,10 @@
 #include "utils.h"
 #include "rpc_types.h"
 
+#ifdef USE_ASCEND_DIRECT
+#include <ylt/coro_http/coro_http_server.hpp>
+#endif
+
 namespace mooncake {
 
 class RealClient;
