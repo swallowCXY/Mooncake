@@ -21,6 +21,7 @@
 #include "default_config.h"
 #ifdef USE_ASCEND_DIRECT
 #include "acl/acl_rt.h"
+#include "config.h"
 #include "transport/ascend_transport/ascend_direct_transport/context_manager.h"
 #endif
 
