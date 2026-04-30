@@ -79,13 +79,15 @@ class DummyClient : public PyClient {
 
     std::vector<int64_t> batch_get_into(
         const std::vector<std::string>& keys, const std::vector<void*>& buffers,
-        const std::vector<size_t>& sizes) override;
+        const std::vector<size_t>& sizes,
+        const ReadRouteConfig& config = {}) override;
 
     std::vector<int> batch_get_into_multi_buffers(
         const std::vector<std::string>& keys,
         const std::vector<std::vector<void*>>& all_buffers,
         const std::vector<std::vector<size_t>>& all_sizes,
-        bool aggregate_same_segment_task) override;
+        bool aggregate_same_segment_task,
+        const ReadRouteConfig& config = {}) override;
 
     int put_from(const std::string& key, void* buffer, size_t size,
                  const WriteConfig& config) override;
@@ -98,13 +100,13 @@ class DummyClient : public PyClient {
     std::vector<int> batch_put_from(const std::vector<std::string>& keys,
                                     const std::vector<void*>& buffers,
                                     const std::vector<size_t>& sizes,
-                                    const ReplicateConfig& config) override;
+                                    const WriteConfig& config) override;
 
     std::vector<int> batch_put_from_multi_buffers(
         const std::vector<std::string>& keys,
         const std::vector<std::vector<void*>>& all_buffers,
         const std::vector<std::vector<size_t>>& all_sizes,
-        const ReplicateConfig& config) override;
+        const WriteConfig& config) override;
 
     std::shared_ptr<BufferHandle> get_buffer(
         const std::string& key, const ReadRouteConfig& config = {}) override;

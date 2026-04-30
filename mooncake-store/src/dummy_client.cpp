@@ -728,11 +728,17 @@ std::string DummyClient::get_hostname() const {
 
 std::vector<int> DummyClient::batch_put_from(
     const std::vector<std::string>& keys, const std::vector<void*>& buffer_ptrs,
-    const std::vector<size_t>& sizes, const ReplicateConfig& config) {
+    const std::vector<size_t>& sizes, const WriteConfig& config) {
     std::vector<uint64_t> buffers = void_ptrs_to_u64(buffer_ptrs);
+    ReplicateConfig rep_config;
+    if (std::holds_alternative<WriteRouteConfig>(config)) {
+        rep_config = std::get<WriteRouteConfig>(config).replicate_config;
+    } else if (std::holds_alternative<ReplicateConfig>(config)) {
+        rep_config = std::get<ReplicateConfig>(config);
+    }
     auto internal_results =
         invoke_batch_rpc<&RealClient::batch_put_from_dummy_helper, void>(
-            keys.size(), keys, buffers, sizes, config, device_id_, client_id_);
+            keys.size(), keys, buffers, sizes, rep_config, device_id_, client_id_);
     std::vector<int> results;
     results.reserve(internal_results.size());
 
@@ -751,7 +757,8 @@ int DummyClient::put_from(const std::string& key, void* buffer, size_t size,
 
 std::vector<int64_t> DummyClient::batch_get_into(
     const std::vector<std::string>& keys, const std::vector<void*>& buffer_ptrs,
-    const std::vector<size_t>& sizes) {
+    const std::vector<size_t>& sizes, const ReadRouteConfig& config) {
+    (void)config;  // Not used for dummy-real mode
     std::vector<uint64_t> buffers = void_ptrs_to_u64(buffer_ptrs);
     auto internal_results =
         invoke_batch_rpc<&RealClient::batch_get_into_dummy_helper, int64_t>(
@@ -778,13 +785,19 @@ std::vector<int> DummyClient::batch_put_from_multi_buffers(
     const std::vector<std::string>& keys,
     const std::vector<std::vector<void*>>& all_buffer_ptrs,
     const std::vector<std::vector<size_t>>& all_sizes,
-    const ReplicateConfig& config) {
+    const WriteConfig& config) {
     std::vector<std::vector<uint64_t>> dummy_nested =
         void_ptr_rows_to_u64_nested(all_buffer_ptrs);
+    ReplicateConfig rep_config;
+    if (std::holds_alternative<WriteRouteConfig>(config)) {
+        rep_config = std::get<WriteRouteConfig>(config).replicate_config;
+    } else if (std::holds_alternative<ReplicateConfig>(config)) {
+        rep_config = std::get<ReplicateConfig>(config);
+    }
     auto internal_results =
         invoke_batch_rpc<&RealClient::batch_put_from_multi_buffers_dummy_helper,
                          void>(keys.size(), keys, dummy_nested, all_sizes,
-                               config, device_id_, client_id_);
+                               rep_config, device_id_, client_id_);
     std::vector<int> results;
     results.reserve(internal_results.size());
     for (const auto& result : internal_results) {
@@ -797,14 +810,15 @@ std::vector<int> DummyClient::batch_get_into_multi_buffers(
     const std::vector<std::string>& keys,
     const std::vector<std::vector<void*>>& all_buffer_ptrs,
     const std::vector<std::vector<size_t>>& all_sizes,
-    bool prefer_alloc_in_same_node) {
+    bool aggregate_same_segment_task, const ReadRouteConfig& config) {
+    (void)aggregate_same_segment_task;  // Not used for dummy-real mode
+    (void)config;  // Not used for dummy-real mode
     std::vector<std::vector<uint64_t>> dummy_nested =
         void_ptr_rows_to_u64_nested(all_buffer_ptrs);
     auto internal_results =
         invoke_batch_rpc<&RealClient::batch_get_into_multi_buffers_dummy_helper,
                          int64_t>(keys.size(), keys, dummy_nested, all_sizes,
-                                  prefer_alloc_in_same_node, device_id_,
-                                  client_id_);
+                                  true, device_id_, client_id_);
     std::vector<int> results;
     results.reserve(internal_results.size());
     for (const auto& result : internal_results) {
