@@ -1387,17 +1387,10 @@ std::vector<int> RealClient::batch_put_from(
 
 std::vector<tl::expected<void, ErrorCode>>
 RealClient::batch_put_from_dummy_helper(
-<<<<<<< HEAD
-    const std::vector<std::string>& keys,
-    const std::vector<uint64_t>& dummy_buffers,
-    const std::vector<size_t>& sizes, const WriteConfig& config,
-    const UUID& client_id) {
-=======
     const std::vector<std::string> &keys,
     const std::vector<uint64_t> &dummy_buffers,
     const std::vector<size_t> &sizes, const ReplicateConfig &config,
     int32_t device_id, const UUID &client_id) {
-    // Set the device context for the current thread
 #ifdef USE_ASCEND_DIRECT
     if (!ContextManager::getInstance().setCurrentContextByPhysicalId(
             device_id)) {
@@ -1407,7 +1400,6 @@ RealClient::batch_put_from_dummy_helper(
     }
 #endif
 
->>>>>>> 5821a195 (ascend adapt to dummy real (#1723))
     std::shared_lock<std::shared_mutex> lock(dummy_client_mutex_);
     auto it = shm_contexts_.find(client_id);
     if (it == shm_contexts_.end()) {
@@ -1417,48 +1409,11 @@ RealClient::batch_put_from_dummy_helper(
     }
     auto& context = it->second;
 
-<<<<<<< HEAD
-    std::vector<void*> buffers;
-    buffers.reserve(dummy_buffers.size());
-    const MappedShm* last_hit_shm = nullptr;
-
-    for (size_t i = 0; i < dummy_buffers.size(); ++i) {
-        uint64_t dummy_addr = dummy_buffers[i];
-        size_t size = sizes[i];
-        bool found = false;
-
-        if (last_hit_shm && dummy_addr >= last_hit_shm->dummy_base_addr &&
-            dummy_addr + size <=
-                last_hit_shm->dummy_base_addr + last_hit_shm->shm_size) {
-            buffers.push_back(reinterpret_cast<void*>(
-                dummy_addr + last_hit_shm->shm_addr_offset));
-            found = true;
-        } else {
-            for (const auto& shm : context.mapped_shms) {
-                if (dummy_addr >= shm.dummy_base_addr &&
-                    dummy_addr + size <= shm.dummy_base_addr + shm.shm_size) {
-                    buffers.push_back(reinterpret_cast<void*>(
-                        dummy_addr + shm.shm_addr_offset));
-                    found = true;
-                    last_hit_shm = &shm;
-                    break;
-                }
-            }
-        }
-
-        if (!found) {
-            LOG(ERROR) << "Dummy buffer at " << dummy_addr
-                       << " not found in any mapped shared memory";
-            return std::vector<tl::expected<void, ErrorCode>>(
-                keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
-        }
-=======
     auto buffers_result =
         map_dummy_addrs_to_real_ptrs(context, dummy_buffers, sizes, client_id);
     if (!buffers_result) {
         return std::vector<tl::expected<void, ErrorCode>>(
             keys.size(), tl::unexpected(buffers_result.error()));
->>>>>>> 5821a195 (ascend adapt to dummy real (#1723))
     }
     return batch_put_from_internal(keys, buffers_result.value(), sizes, config);
 }
@@ -1585,12 +1540,6 @@ std::vector<int64_t> RealClient::batch_get_into(
 
 std::vector<tl::expected<int64_t, ErrorCode>>
 RealClient::batch_get_into_dummy_helper(
-<<<<<<< HEAD
-    const std::vector<std::string>& keys,
-    const std::vector<uint64_t>& dummy_buffers,
-    const std::vector<size_t>& sizes, const ReadRouteConfig& config,
-    const UUID& client_id) {
-=======
     const std::vector<std::string> &keys,
     const std::vector<uint64_t> &dummy_buffers,
     const std::vector<size_t> &sizes, int32_t device_id,
@@ -1604,7 +1553,6 @@ RealClient::batch_get_into_dummy_helper(
     }
 #endif
 
->>>>>>> 5821a195 (ascend adapt to dummy real (#1723))
     std::shared_lock<std::shared_mutex> lock(dummy_client_mutex_);
     auto it = shm_contexts_.find(client_id);
     if (it == shm_contexts_.end()) {
@@ -1614,46 +1562,6 @@ RealClient::batch_get_into_dummy_helper(
     }
     auto& context = it->second;
 
-<<<<<<< HEAD
-    std::vector<void*> buffers;
-    buffers.reserve(dummy_buffers.size());
-    const MappedShm* last_hit_shm = nullptr;
-
-    for (size_t i = 0; i < dummy_buffers.size(); ++i) {
-        uint64_t dummy_addr = dummy_buffers[i];
-        size_t size = sizes[i];
-        bool found = false;
-
-        if (last_hit_shm && dummy_addr >= last_hit_shm->dummy_base_addr &&
-            dummy_addr + size <=
-                last_hit_shm->dummy_base_addr + last_hit_shm->shm_size) {
-            buffers.push_back(reinterpret_cast<void*>(
-                dummy_addr + last_hit_shm->shm_addr_offset));
-            found = true;
-        } else {
-            for (const auto& shm : context.mapped_shms) {
-                if (dummy_addr >= shm.dummy_base_addr &&
-                    dummy_addr + size <= shm.dummy_base_addr + shm.shm_size) {
-                    buffers.push_back(reinterpret_cast<void*>(
-                        dummy_addr + shm.shm_addr_offset));
-                    found = true;
-                    last_hit_shm = &shm;
-                    break;
-                }
-            }
-        }
-
-        if (!found) {
-            LOG(ERROR) << "Dummy buffer at " << dummy_addr << " (size " << size
-                       << ") "
-                       << "not found in any mapped shared memory for client "
-                       << client_id;
-            return std::vector<tl::expected<int64_t, ErrorCode>>(
-                keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
-        }
-    }
-    return batch_get_into_internal(keys, buffers, sizes, config);
-=======
     auto buffers_result =
         map_dummy_addrs_to_real_ptrs(context, dummy_buffers, sizes, client_id);
     if (!buffers_result) {
@@ -1732,7 +1640,6 @@ RealClient::batch_get_into_multi_buffers_dummy_helper(
     return batch_get_into_multi_buffers_internal(
         keys, real_buffers_result.value(), all_sizes,
         prefer_alloc_in_same_node);
->>>>>>> 5821a195 (ascend adapt to dummy real (#1723))
 }
 
 std::vector<tl::expected<int64_t, ErrorCode>>
