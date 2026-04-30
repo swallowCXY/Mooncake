@@ -731,10 +731,10 @@ std::vector<int> DummyClient::batch_put_from(
     const std::vector<size_t>& sizes, const WriteConfig& config) {
     std::vector<uint64_t> buffers = void_ptrs_to_u64(buffer_ptrs);
     ReplicateConfig rep_config;
-    if (std::holds_alternative<WriteRouteConfig>(config)) {
-        rep_config = std::get<WriteRouteConfig>(config).replicate_config;
-    } else if (std::holds_alternative<ReplicateConfig>(config)) {
+    if (std::holds_alternative<ReplicateConfig>(config)) {
         rep_config = std::get<ReplicateConfig>(config);
+    } else if (std::holds_alternative<WriteRouteRequestConfig>(config)) {
+        rep_config = std::get<WriteRouteRequestConfig>(config).replicate_config;
     }
     auto internal_results =
         invoke_batch_rpc<&RealClient::batch_put_from_dummy_helper, void>(
@@ -789,10 +789,10 @@ std::vector<int> DummyClient::batch_put_from_multi_buffers(
     std::vector<std::vector<uint64_t>> dummy_nested =
         void_ptr_rows_to_u64_nested(all_buffer_ptrs);
     ReplicateConfig rep_config;
-    if (std::holds_alternative<WriteRouteConfig>(config)) {
-        rep_config = std::get<WriteRouteConfig>(config).replicate_config;
-    } else if (std::holds_alternative<ReplicateConfig>(config)) {
+    if (std::holds_alternative<ReplicateConfig>(config)) {
         rep_config = std::get<ReplicateConfig>(config);
+    } else if (std::holds_alternative<WriteRouteRequestConfig>(config)) {
+        rep_config = std::get<WriteRouteRequestConfig>(config).replicate_config;
     }
     auto internal_results =
         invoke_batch_rpc<&RealClient::batch_put_from_multi_buffers_dummy_helper,
