@@ -733,8 +733,8 @@ std::vector<int> DummyClient::batch_put_from(
     ReplicateConfig rep_config;
     if (std::holds_alternative<ReplicateConfig>(config)) {
         rep_config = std::get<ReplicateConfig>(config);
-    } else if (std::holds_alternative<WriteRouteRequestConfig>(config)) {
-        rep_config = std::get<WriteRouteRequestConfig>(config).replicate_config;
+    } else {
+        rep_config = ReplicateConfig{};
     }
     auto internal_results =
         invoke_batch_rpc<&RealClient::batch_put_from_dummy_helper, void>(
@@ -791,8 +791,8 @@ std::vector<int> DummyClient::batch_put_from_multi_buffers(
     ReplicateConfig rep_config;
     if (std::holds_alternative<ReplicateConfig>(config)) {
         rep_config = std::get<ReplicateConfig>(config);
-    } else if (std::holds_alternative<WriteRouteRequestConfig>(config)) {
-        rep_config = std::get<WriteRouteRequestConfig>(config).replicate_config;
+    } else {
+        rep_config = ReplicateConfig{};
     }
     auto internal_results =
         invoke_batch_rpc<&RealClient::batch_put_from_multi_buffers_dummy_helper,
