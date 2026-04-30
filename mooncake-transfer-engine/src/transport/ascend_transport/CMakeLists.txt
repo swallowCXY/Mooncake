@@ -8,6 +8,7 @@ else ()
 endif ()
 
 if (USE_ASCEND_DIRECT OR USE_UBSHMEM)
+    list(APPEND ASCEND_SOURCES "ascend_allocator.cpp")
     set(ACL_RUNTIME_HEADER_PATH "${ASCEND_INCLUDE_DIR}/acl/acl_rt.h")
     if(EXISTS "${ACL_RUNTIME_HEADER_PATH}")
         file(READ "${ACL_RUNTIME_HEADER_PATH}" ACL_RUNTIME_CONTENT)
