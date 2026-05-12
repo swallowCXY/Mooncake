@@ -4,6 +4,7 @@
 #include <variant>
 #include "client_config_builder.h"
 #include "real_client.h"
+#include "config.h"
 
 using namespace mooncake;
 
