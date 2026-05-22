@@ -3,6 +3,10 @@
 #include <ylt/coro_rpc/coro_rpc_server.hpp>
 #include "utils/scoped_vlog_timer.h"
 
+#ifdef USE_ASCEND_DIRECT
+#include "transport/ascend_transport/ascend_direct_transport/context_manager.h"
+#endif
+
 namespace mooncake {
 
 ClientRpcService::ClientRpcService(DataManager& data_manager)
@@ -13,6 +17,18 @@ tl::expected<void, ErrorCode> ClientRpcService::ReadRemoteData(
     ScopedVLogTimer timer(1, "ClientRpcService::ReadRemoteData");
     timer.LogRequest("key=", request.key,
                      "buffer_count=", request.dest_buffers.size());
+
+#ifdef USE_ASCEND_DIRECT
+    if (request.device_id != kInvalidPhysicalDeviceId) {
+        if (!ContextManager::getInstance().setCurrentContextByPhysicalId(
+                request.device_id)) {
+            LOG(ERROR) << "ReadRemoteData: Failed to set context for physical "
+                       << "device " << request.device_id;
+            timer.LogResponse("error_code=", ErrorCode::INVALID_PARAMS);
+            return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+        }
+    }
+#endif
 
     if (request.key.empty()) {
         LOG(ERROR) << "ReadRemoteData: empty key";
@@ -26,7 +42,6 @@ tl::expected<void, ErrorCode> ClientRpcService::ReadRemoteData(
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
 
-    // Validate buffers (segment name validation is done in DataManager)
     for (const auto& buffer_desc : request.dest_buffers) {
         if (buffer_desc.size == 0 || buffer_desc.addr == 0) {
             LOG(ERROR)
@@ -36,7 +51,6 @@ tl::expected<void, ErrorCode> ClientRpcService::ReadRemoteData(
         }
     }
 
-    // Delegate to DataManager
     auto result =
         data_manager_.ReadRemoteData(request.key, request.dest_buffers);
 
@@ -45,7 +59,6 @@ tl::expected<void, ErrorCode> ClientRpcService::ReadRemoteData(
                    << ", error: " << toString(result.error());
         timer.LogResponse("error_code=", result.error());
 
-        // Rectify stale route when key not found
         if (result.error() == ErrorCode::OBJECT_NOT_FOUND) {
             data_manager_.RectifyReadRoute(request.key);
         }
@@ -62,6 +75,18 @@ tl::expected<UUID, ErrorCode> ClientRpcService::WriteRemoteData(
     timer.LogRequest("key=", request.key,
                      "buffer_count=", request.src_buffers.size());
 
+#ifdef USE_ASCEND_DIRECT
+    if (request.device_id != kInvalidPhysicalDeviceId) {
+        if (!ContextManager::getInstance().setCurrentContextByPhysicalId(
+                request.device_id)) {
+            LOG(ERROR) << "WriteRemoteData: Failed to set context for physical "
+                       << "device " << request.device_id;
+            timer.LogResponse("error_code=", ErrorCode::INVALID_PARAMS);
+            return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+        }
+    }
+#endif
+
     if (request.key.empty()) {
         LOG(ERROR) << "WriteRemoteData: empty key";
         timer.LogResponse("error_code=", ErrorCode::INVALID_PARAMS);
@@ -74,7 +99,6 @@ tl::expected<UUID, ErrorCode> ClientRpcService::WriteRemoteData(
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
 
-    // Validate buffers (segment name validation is done in DataManager)
     for (const auto& buffer_desc : request.src_buffers) {
         if (buffer_desc.size == 0 || buffer_desc.addr == 0) {
             LOG(ERROR) << "WriteRemoteData: invalid buffer (zero size or null "
@@ -84,7 +108,6 @@ tl::expected<UUID, ErrorCode> ClientRpcService::WriteRemoteData(
         }
     }
 
-    // Delegate to DataManager
     auto result = data_manager_.WriteRemoteData(
         request.key, request.src_buffers, request.target_tier_id);
 

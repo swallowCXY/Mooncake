@@ -7,6 +7,11 @@
 #include <cstring>
 #include <thread>
 
+#ifdef USE_ASCEND_DIRECT
+#include "acl/acl_rt.h"
+#include "transport/ascend_transport/ascend_direct_transport/context_manager.h"
+#endif
+
 namespace mooncake {
 
 // ============================================================================
@@ -96,6 +101,26 @@ ErrorCode P2PClientService::Init(const P2PClientConfig& config) {
                      "initialization.";
     }
     initTeEndpoint();
+
+#ifdef USE_ASCEND_DIRECT
+    if (config.protocol == "ascend") {
+        globalConfig().ascend_agent_mode = true;
+        int32_t logic_dev = 0;
+        auto acl_ret = aclrtGetDevice(&logic_dev);
+        if (acl_ret != ACL_ERROR_NONE) {
+            LOG(ERROR) << "Failed to get current device, ret=" << acl_ret;
+            return ErrorCode::INVALID_PARAMS;
+        }
+        acl_ret = aclrtGetPhyDevIdByLogicDevId(logic_dev, &local_device_id_);
+        if (acl_ret != ACL_ERROR_NONE) {
+            LOG(ERROR) << "Failed to get physical device id, ret=" << acl_ret
+                       << ", errmsg: " << aclGetRecentErrMsg();
+            return ErrorCode::INVALID_PARAMS;
+        }
+        LOG(INFO) << "P2PClientService: logic_dev=" << logic_dev
+                  << " physical_dev=" << local_device_id_;
+    }
+#endif
 
     // 3. Register with master BEFORE InitStorage, because InitStorage
     //    triggers TieredBackend::MountSegment which requires the client to
@@ -444,6 +469,7 @@ tl::expected<void, ErrorCode> P2PClientService::PutViaRoute(
             // memory) and let the remote side pull data.
             RemoteWriteRequest write_req;
             write_req.key = key;
+            write_req.device_id = local_device_id_;
             for (const auto& slice : slices) {
                 RemoteBufferDesc buf;
                 buf.segment_endpoint = get_te_endpoint();
@@ -895,6 +921,7 @@ tl::expected<void, ErrorCode> P2PClientService::GetRemoteViaRoute(
             auto& peer = GetOrCreatePeerClient(endpoint);
             RemoteReadRequest read_req;
             read_req.key = key;
+            read_req.device_id = local_device_id_;
             for (const auto& slice : slices) {
                 RemoteBufferDesc buf;
                 buf.segment_endpoint = get_te_endpoint();

@@ -520,6 +520,9 @@ class ClientService {
     const std::string& get_te_endpoint() const { return te_endpoint_; }
 
     const std::string metadata_connstring_;
+
+    int32_t local_device_id_ = kInvalidPhysicalDeviceId;
+
     // For high availability
     MasterViewHelper master_view_helper_;
     std::thread heartbeat_thread_;

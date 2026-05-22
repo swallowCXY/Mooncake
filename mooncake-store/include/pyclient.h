@@ -11,8 +11,6 @@ namespace mooncake {
 
 #define MOONCAKE_SHM_NAME "mooncake_shm"
 
-constexpr int32_t kInvalidPhysicalDeviceId = -1;
-
 enum IpcRequestType : uint32_t {
     IPC_SHM_REGISTER = 0,    // dummy → real: register a shm fd
 };
