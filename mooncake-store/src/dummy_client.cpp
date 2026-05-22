@@ -86,6 +86,26 @@ bool ShmHelper::cleanup() {
 
 void* ShmHelper::allocate(size_t size) {
     std::lock_guard<std::mutex> lock(shm_mutex_);
+    
+#ifdef USE_ASCEND_DIRECT
+    if (globalConfig().ascend_agent_mode) {
+        if (globalConfig().ascend_use_fabric_mem) {
+            void* base_addr = nullptr;
+            base_addr = ascend_allocate_vmm_memory_direct(size);
+            if (base_addr == nullptr) {
+                throw std::runtime_error("Failed to allocate VMM shared memory");
+            }
+            auto shm = std::make_shared<ShmSegment>();
+            shm->fd = -1;
+            shm->base_addr = base_addr;
+            shm->size = size;
+            shm->name = MOONCAKE_SHM_NAME;
+            shm->registered = false;
+            shms_.push_back(shm);
+            return base_addr;
+        }
+    }
+#endif
 
     // Create memfd
     int fd = memfd_create_wrapper(MOONCAKE_SHM_NAME, MFD_CLOEXEC);
@@ -338,9 +358,16 @@ int DummyClient::register_ascend_shm(const ShmHelper::ShmSegment* shm,
         return 0;
     }
     if (!globalConfig().ascend_use_fabric_mem) {
-        LOG(ERROR) << "Host mem is only supported in fabric mem mode.";
-        return -1;
+        // Host: memfd + mmap (ShmHelper); register with Real like non-agent GPU path.
+        if (shm->fd < 0) {
+            LOG(ERROR)
+                << "Host POSIX shared memory requires memfd-backed allocation "
+                   "(use ShmHelper::allocate / alloc_from_mem_pool)";
+            return -1;
+        }
+        return register_shm_via_ipc(shm, is_local);
     }
+
 
     // Fabric host mem shared by vmm
     aclrtDrvMemHandle physical_handle =
@@ -411,12 +438,22 @@ int DummyClient::register_shm_via_ipc(const ShmHelper::ShmSegment* shm,
         return -1;
     }
 
+    // Send request type first
+    IpcRequestType type = IPC_SHM_REGISTER;
+    if (::send(sock_fd, &type, sizeof(type), 0) < 0) {
+        LOG(ERROR) << "Failed to send IPC request type: " << strerror(errno);
+        close(sock_fd);
+        return -1;
+    }
+
     ShmRegisterRequest req;
     req.client_id_first = client_id_.first;
     req.client_id_second = client_id_.second;
     req.dummy_base_addr = reinterpret_cast<uintptr_t>(shm->base_addr);
     req.shm_size = shm->size;
+    req.device_id = globalConfig().ascend_agent_mode ? device_id_ : -1;
     req.is_local_buffer = is_local;
+
 
     if (send_fd(sock_fd, shm->fd, &req, sizeof(req)) < 0) {
         LOG(ERROR) << "Failed to send FD to RealClient: " << strerror(errno);

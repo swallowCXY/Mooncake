@@ -43,6 +43,25 @@ bool checkAcl(aclError result, const char *message) {
     }
     return true;
 }
+
+tl::expected<void, ErrorCode> set_context_if_needed(const std::string &protocol,
+                                                    int32_t physical_device_id,
+                                                    const char *action) {
+    if (protocol != "ascend" || !globalConfig().ascend_agent_mode) {
+        return {};
+    }
+    if (physical_device_id == kInvalidPhysicalDeviceId) {
+        LOG(ERROR) << "Missing physical device id for " << action;
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    if (!ContextManager::getInstance().setCurrentContextByPhysicalId(
+            physical_device_id)) {
+        LOG(ERROR) << "Failed to set current context for physical device "
+                   << physical_device_id << " during " << action;
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    return {};
+}
 #endif
 }  // namespace
 
@@ -299,6 +318,14 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(ConfigT& config) {
     this->protocol = config.protocol;
     this->ipc_socket_path_ = config.ipc_socket_path;
 
+
+    // Initialize Ascend ContextManager if using ascend protocol
+    if (this->protocol == "ascend") {
+        auto ascend_res = setup_ascend_internal(config.local_buffer_size);
+        if (!ascend_res) {
+            return ascend_res;
+        }
+    }
     if (config.te_port == 0) {
         // Create port binder to hold a port
         port_binder_ = std::make_unique<AutoPortBinder>();
@@ -777,9 +804,18 @@ int64_t RealClient::getSize(const std::string& key) {
     return to_py_ret(getSize_internal(key));
 }
 
-tl::expected<void, ErrorCode> RealClient::map_shm_internal(
+tl::expected<void, ErrorCode> RealClient::map_shm_internal_with_device(
     int fd, uint64_t dummy_base_addr, size_t shm_size, bool is_local_buffer,
-    const UUID& client_id) {
+    int32_t physical_device_id, const UUID& client_id) {
+#ifdef USE_ASCEND_DIRECT
+    auto context_result = set_context_if_needed(protocol, physical_device_id,
+                                                "POSIX shm registration");
+    if (!context_result) {
+        close(fd);
+        return context_result;
+    }
+#endif
+
     std::stringstream addr_stream;
     addr_stream << "0x" << std::hex << dummy_base_addr;
 
@@ -788,10 +824,8 @@ tl::expected<void, ErrorCode> RealClient::map_shm_internal(
         "_" + std::to_string(client_id.second) + "_" + addr_stream.str();
     std::unique_lock<std::shared_mutex> lock(dummy_client_mutex_);
 
-    // Check if client context exists, create if not
     auto& context = shm_contexts_[client_id];
 
-    // Check if this shm is already mapped
     for (const auto& shm : context.mapped_shms) {
         if (shm.dummy_base_addr == static_cast<uintptr_t>(dummy_base_addr)) {
             LOG(INFO) << "Segment already mapped: " << shm_name;
@@ -805,7 +839,6 @@ tl::expected<void, ErrorCode> RealClient::map_shm_internal(
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
 
-    // Map shared memory from FD
     void* shm_buffer =
         mmap(nullptr, shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (shm_buffer == MAP_FAILED) {
@@ -815,7 +848,7 @@ tl::expected<void, ErrorCode> RealClient::map_shm_internal(
         return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
     }
 
-    close(fd);  // Close FD after mapping
+    close(fd);
 
     MappedShm shm{};
     shm.shm_name = shm_name;
@@ -837,8 +870,7 @@ tl::expected<void, ErrorCode> RealClient::map_shm_internal(
 
     if (is_local_buffer) {
         if (context.client_buffer_allocator) {
-            LOG(ERROR) << "A local buffer is already mapped for this "
-                          "client shared memory.";
+            LOG(ERROR) << "A local buffer is already mapped for this client shared memory.";
             munmap(shm_buffer, shm_size);
             return tl::make_unexpected(ErrorCode::OBJECT_ALREADY_EXISTS);
         }
@@ -851,6 +883,14 @@ tl::expected<void, ErrorCode> RealClient::map_shm_internal(
     LOG(INFO) << "Mapped new shared memory: " << shm_name
               << ", size: " << shm_size;
     return {};
+}
+
+tl::expected<void, ErrorCode> RealClient::map_shm_internal(
+    int fd, uint64_t dummy_base_addr, size_t shm_size, bool is_local_buffer,
+    const UUID &client_id) {
+    return map_shm_internal_with_device(fd, dummy_base_addr, shm_size,
+                                        is_local_buffer,
+                                        kInvalidPhysicalDeviceId, client_id);
 }
 
 tl::expected<void, ErrorCode> RealClient::unmap_shm_internal(
@@ -2009,34 +2049,50 @@ void RealClient::ipc_server_func() {
             break;
         }
 
-        ShmRegisterRequest req;
-        int fd = recv_fd(client_sock, &req, sizeof(req));
+        // Read request type discriminator
+        IpcRequestType req_type;
+        if (recv(client_sock, &req_type, sizeof(req_type), MSG_WAITALL) !=
+            sizeof(req_type)) {
+            LOG(ERROR) << "Failed to read IPC request type";
+            close(client_sock);
+            continue;
+        }
 
-        int status = 0;
-        if (fd < 0) {
-            LOG(ERROR) << "Failed to receive FD from client";
-            status = -1;
+        // Dispatch based on request type
+        if (req_type == IPC_SHM_REGISTER) {
+            handle_ipc_shm_register(client_sock);
         } else {
-            UUID client_id = {req.client_id_first, req.client_id_second};
-            auto ret = map_shm_internal(fd, req.dummy_base_addr, req.shm_size,
-                                        req.is_local_buffer, client_id);
-            if (!ret) {
-                status = toInt(ret.error());
-                // FD is closed inside map_shm_internal
-            }
+            LOG(ERROR) << "Unknown IPC request type: " << req_type;
+            close(client_sock);
         }
-
-        // Send response
-        if (send(client_sock, &status, sizeof(status), 0) < 0) {
-            LOG(ERROR) << "Failed to send response to client";
-        }
-        close(client_sock);
     }
 
     close(server_sock);
     LOG(INFO) << "IPC server stopped";
 }
 
+void RealClient::handle_ipc_shm_register(int client_sock) {
+    ShmRegisterRequest req;
+    int fd = recv_fd(client_sock, &req, sizeof(req));
+
+    int status = 0;
+    if (fd < 0) {
+        LOG(ERROR) << "Failed to receive fd for SHM_REGISTER";
+        status = -1;
+    } else {
+        UUID client_id{req.client_id_first, req.client_id_second};
+        auto result = map_shm_internal_with_device(
+            fd, req.dummy_base_addr, req.shm_size, req.is_local_buffer,
+            req.device_id, client_id);
+
+        if (!result) {
+            status = -1;
+        }
+    }
+
+    ::send(client_sock, &status, sizeof(status), 0);
+    close(client_sock);
+}
 std::vector<Replica::Descriptor> RealClient::get_replica_desc(
     const std::string& key) {
     auto query_result = client_service_->Query(key);

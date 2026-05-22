@@ -92,6 +92,11 @@ target_link_libraries(mooncake_store
         transfer_engine
 )
 
+# Define USE_ASCEND_DIRECT compile definition if enabled
+if(USE_ASCEND_DIRECT)
+  target_compile_definitions(mooncake_store PRIVATE USE_ASCEND_DIRECT)
+endif()
+
 # Link Ascend ACL library if USE_ASCEND_CACHE_TIER is enabled
 if(USE_ASCEND_CACHE_TIER)
   # Try to find Ascend ACL library
@@ -106,6 +111,19 @@ if(USE_ASCEND_CACHE_TIER)
     message(WARNING "ascendcl library not found. Ascend cache tier will use fallback mode (no ACL).")
   else()
     message(STATUS "Found ascendcl library: ${ASCENDCL_LIB}")
+
+    # Find ascend_hal library (required by ascend_dump)
+    set(ASCEND_HAL_SEARCH_PATHS
+        $ENV{ASCEND_HOME}/aarch64-linux/lib64/device/lib64
+        $ENV{ASCEND_HOME}/aarch64-linux/devlib
+        /usr/local/Ascend/cann-8.5.1/aarch64-linux/lib64/device/lib64
+        /usr/local/Ascend/cann-8.5.1/aarch64-linux/devlib
+    )
+    find_library(ASCEND_HAL_LIB ascend_hal PATHS ${ASCEND_HAL_SEARCH_PATHS} NO_DEFAULT_PATH)
+    if(ASCEND_HAL_LIB)
+      message(STATUS "Found ascend_hal library: ${ASCEND_HAL_LIB}")
+      target_link_libraries(mooncake_store PUBLIC ${ASCEND_HAL_LIB})
+    endif()
     target_link_libraries(mooncake_store PUBLIC ${ASCENDCL_LIB})
 
     # Add include paths for Ascend headers
@@ -158,6 +176,12 @@ target_link_libraries(mooncake_master PRIVATE
 )
 
 if (STORE_USE_ETCD)
+
+# Define USE_ASCEND_DIRECT for mooncake_master and mooncake_client
+if(USE_ASCEND_DIRECT)
+  target_compile_definitions(mooncake_master PRIVATE USE_ASCEND_DIRECT)
+  target_compile_definitions(mooncake_client PRIVATE USE_ASCEND_DIRECT)
+endif()
     add_dependencies(mooncake_master build_etcd_wrapper)
 endif()
 

@@ -10,12 +10,19 @@
 namespace mooncake {
 
 #define MOONCAKE_SHM_NAME "mooncake_shm"
-// Protocol structure for IPC registration
+
+constexpr int32_t kInvalidPhysicalDeviceId = -1;
+
+enum IpcRequestType : uint32_t {
+    IPC_SHM_REGISTER = 0,    // dummy → real: register a shm fd
+};
+
 struct ShmRegisterRequest {
     uint64_t client_id_first;
     uint64_t client_id_second;
     uint64_t dummy_base_addr;
     uint64_t shm_size;
+    int32_t device_id = kInvalidPhysicalDeviceId;
     bool is_local_buffer;
 };
 

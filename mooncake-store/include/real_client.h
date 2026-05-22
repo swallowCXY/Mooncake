@@ -334,6 +334,10 @@ class RealClient : public PyClient {
 
     tl::expected<void, ErrorCode> unmap_shm_internal(const UUID& client_id);
 
+    tl::expected<void, ErrorCode> map_shm_internal_with_device(
+        int fd, uint64_t shm_base_addr, size_t shm_size, bool is_local_buffer,
+        int32_t physical_device_id, const UUID &client_id);
+
     tl::expected<void, ErrorCode> ascend_shm_internal(
         uint64_t dummy_base_addr, size_t vmm_size, bool is_local_buffer,
         const std::string &shareable_handle_bytes, int32_t device_id,
