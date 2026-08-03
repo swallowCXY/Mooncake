@@ -114,6 +114,16 @@ class MasterMetricManager {
     void inc_ping_requests(int64_t val = 1);
     void inc_ping_failures(int64_t val = 1);
 
+    // P2P deployment mode operation statistics
+    void inc_heartbeat_requests(int64_t val = 1);
+    void inc_heartbeat_failures(int64_t val = 1);
+    void inc_get_write_route_requests(int64_t val = 1);
+    void inc_get_write_route_failures(int64_t val = 1);
+    void inc_add_replica_requests(int64_t val = 1);
+    void inc_add_replica_failures(int64_t val = 1);
+    void inc_remove_replica_requests(int64_t val = 1);
+    void inc_remove_replica_failures(int64_t val = 1);
+
     // Batch Operation Statistics (Counters)
     void inc_batch_exist_key_requests(int64_t items);
     void inc_batch_exist_key_failures(int64_t failed_items);
@@ -136,6 +146,12 @@ class MasterMetricManager {
     void inc_batch_put_revoke_requests(int64_t items);
     void inc_batch_put_revoke_failures(int64_t failed_items);
     void inc_batch_put_revoke_partial_success(int64_t failed_items);
+    void inc_batch_remove_replica_requests(int64_t items);
+    void inc_batch_remove_replica_failures(int64_t failed_items);
+    void inc_batch_remove_replica_partial_success(int64_t failed_items);
+    void inc_batch_get_write_route_requests(int64_t items);
+    void inc_batch_get_write_route_failures(int64_t failed_items);
+    void inc_batch_get_write_route_partial_success(int64_t failed_items);
 
     // Operation Statistics Getters
     int64_t get_put_start_requests();
@@ -296,6 +312,16 @@ class MasterMetricManager {
     ylt::metric::counter_t ping_requests_;
     ylt::metric::counter_t ping_failures_;
 
+    // P2P deployment mode operation statistics
+    ylt::metric::counter_t heartbeat_requests_;
+    ylt::metric::counter_t heartbeat_failures_;
+    ylt::metric::counter_t get_write_route_requests_;
+    ylt::metric::counter_t get_write_route_failures_;
+    ylt::metric::counter_t add_replica_requests_;
+    ylt::metric::counter_t add_replica_failures_;
+    ylt::metric::counter_t remove_replica_requests_;
+    ylt::metric::counter_t remove_replica_failures_;
+
     // Batch Operation Statistics
     ylt::metric::counter_t batch_exist_key_requests_;
     ylt::metric::counter_t batch_exist_key_failures_;
@@ -332,6 +358,12 @@ class MasterMetricManager {
     ylt::metric::counter_t batch_put_revoke_partial_successes_;
     ylt::metric::counter_t batch_put_revoke_items_;
     ylt::metric::counter_t batch_put_revoke_failed_items_;
+    ylt::metric::counter_t batch_remove_replica_requests_;
+    ylt::metric::counter_t batch_remove_replica_failures_;
+    ylt::metric::counter_t batch_remove_replica_partial_successes_;
+    ylt::metric::counter_t batch_get_write_route_requests_;
+    ylt::metric::counter_t batch_get_write_route_failures_;
+    ylt::metric::counter_t batch_get_write_route_partial_successes_;
 
     // cache hit Statistics
     ylt::metric::counter_t mem_cache_hit_nums_;

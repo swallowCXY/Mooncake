@@ -10,6 +10,7 @@
 #include "default_config.h"
 #include "ha_helper.h"
 #include "http_metadata_server.h"
+#include "p2p_rpc_service.h"
 #include "rpc_service.h"
 #include "types.h"
 
@@ -100,6 +101,14 @@ DEFINE_bool(enable_disk_eviction, true,
 DEFINE_uint64(
     quota_bytes, 0,
     "Quota for storage backend in bytes (0 = use default 90% of capacity)");
+DEFINE_string(deployment_mode, "Centralization",
+              "the deployment mode of mooncake-store, master and client must "
+              "run in same mode. Options: Centralization, P2P");
+DEFINE_uint64(max_replicas_per_key, 1,
+              "Maximum number of replicas per key in P2P mode (0 = no limit)");
+DEFINE_int64(
+    client_crashed_ttl, mooncake::DEFAULT_CLIENT_CRASHED_TTL_SEC,
+    "How long a client is considered crashed after the last heartbeat");
 
 void InitMasterConf(const mooncake::DefaultConfig& default_config,
                     mooncake::MasterConfig& master_config) {
@@ -174,7 +183,15 @@ void InitMasterConf(const mooncake::DefaultConfig& default_config,
                            &master_config.enable_disk_eviction,
                            FLAGS_enable_disk_eviction);
     default_config.GetUInt64("quota_bytes", &master_config.quota_bytes,
-                             FLAGS_quota_bytes);
+                              FLAGS_quota_bytes);
+    default_config.GetUInt64("max_replicas_per_key",
+                             &master_config.max_replicas_per_key,
+                             FLAGS_max_replicas_per_key);
+    default_config.GetInt64("client_crashed_ttl_sec",
+                             &master_config.client_crashed_ttl_sec,
+                             FLAGS_client_crashed_ttl);
+    default_config.GetString("deployment_mode", &master_config.deployment_mode,
+                             FLAGS_deployment_mode);
 }
 
 void LoadConfigFromCmdline(mooncake::MasterConfig& master_config,
@@ -360,6 +377,20 @@ void LoadConfigFromCmdline(mooncake::MasterConfig& master_config,
         !conf_set) {
         master_config.quota_bytes = FLAGS_quota_bytes;
     }
+    if ((google::GetCommandLineFlagInfo("deployment_mode", &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        master_config.deployment_mode = FLAGS_deployment_mode;
+    }
+    if ((google::GetCommandLineFlagInfo("max_replicas_per_key", &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        master_config.max_replicas_per_key = FLAGS_max_replicas_per_key;
+    }
+    if (google::GetCommandLineFlagInfo("client_crashed_ttl", &info) &&
+        !info.is_default) {
+        master_config.client_crashed_ttl_sec = FLAGS_client_crashed_ttl;
+    }
 }
 
 // Function to start HTTP metadata server
@@ -470,8 +501,34 @@ int main(int argc, char* argv[]) {
               << master_config.http_metadata_server_host
               << ", put_start_discard_timeout_sec="
               << master_config.put_start_discard_timeout_sec
-              << ", put_start_release_timeout_sec="
-              << master_config.put_start_release_timeout_sec;
+               << ", put_start_release_timeout_sec="
+               << master_config.put_start_release_timeout_sec
+               << ", max_replicas_per_key=" << master_config.max_replicas_per_key
+               << ", deployment_mode=" << master_config.deployment_mode;
+
+    // Process client_crashed_ttl_sec logic
+    if (master_config.client_crashed_ttl_sec == -1) {
+        // Not set by config file and not set by CLI -> Default to 3x live ttl
+        master_config.client_crashed_ttl_sec =
+            master_config.client_live_ttl_sec * 3;
+    } else {
+        // Explicitly set (by file or CLI) -> Validate
+        if (master_config.client_crashed_ttl_sec <
+            master_config.client_live_ttl_sec) {
+            LOG(FATAL) << "client_crashed_ttl ("
+                       << master_config.client_crashed_ttl_sec
+                       << ") must be >= client_ttl ("
+                       << master_config.client_live_ttl_sec << ")";
+            return 1;
+        }
+    }
+
+    if (master_config.deployment_mode != "Centralization" &&
+        master_config.deployment_mode != "P2P") {
+        LOG(FATAL) << "Invalid deployment mode: "
+                   << master_config.deployment_mode;
+        return 1;
+    }
 
     // Start HTTP metadata server if enabled
     std::unique_ptr<mooncake::HttpMetadataServer> http_metadata_server;
@@ -505,10 +562,21 @@ int main(int argc, char* argv[]) {
         if (value && std::string_view(value) == "rdma") {
             server.init_ibv();
         }
-        mooncake::WrappedMasterService wrapped_master_service(
-            mooncake::WrappedMasterServiceConfig(master_config, version));
 
-        mooncake::RegisterRpcService(server, wrapped_master_service);
+        if (master_config.deployment_mode == "Centralization") {
+            mooncake::WrappedMasterService wrapped_master_service(
+                mooncake::WrappedMasterServiceConfig(master_config, version));
+
+            mooncake::RegisterRpcService(server, wrapped_master_service);
+        } else {
+            // P2P deployment mode
+            auto wrapped_master_service =
+                std::make_unique<mooncake::WrappedP2PMasterService>(
+                    mooncake::WrappedMasterServiceConfig(master_config,
+                                                         version));
+
+            mooncake::RegisterP2PRpcService(server, *wrapped_master_service);
+        }
         return server.start();
     }
 }

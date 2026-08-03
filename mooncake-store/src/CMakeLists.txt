@@ -3,6 +3,7 @@ add_subdirectory(cachelib_memory_allocator)
 
 set(MOONCAKE_STORE_SOURCES
     allocator.cpp
+    replica.cpp
     master_service.cpp
     client_service.cpp
     client_metric.cpp
@@ -26,6 +27,32 @@ set(MOONCAKE_STORE_SOURCES
     dummy_client.cpp
     http_metadata_server.cpp
     file_storage.cpp
+    # P2P deployment mode (master side)
+    p2p/p2p_master_service.cpp
+    p2p/p2p_master_client.cpp
+    p2p/p2p_rpc_service.cpp
+    p2p/p2p_client_manager.cpp
+    p2p/p2p_client_meta.cpp
+    p2p/p2p_segment_manager.cpp
+    p2p/client_manager.cpp
+    p2p/client_meta.cpp
+    # P2P deployment mode (client side infra)
+    p2p/p2p_client_service.cpp
+    p2p/peer_client.cpp
+    p2p/client_rpc_service.cpp
+    p2p/route_cache.cpp
+    p2p/async_metadata_notifier.cpp
+    p2p/ha_recovery_manager.cpp
+    p2p/async_memcpy_executor.cpp
+    p2p/data_manager.cpp
+    p2p/tiered_cache/copier_registry.cpp
+    p2p/tiered_cache/data_copier.cpp
+    p2p/tiered_cache/tiered_backend.cpp
+    p2p/tiered_cache/tiers/dram_tier.cpp
+    p2p/tiered_cache/tiers/storage_tier.cpp
+    p2p/tiered_cache/scheduler/simple_policy.cpp
+    p2p/tiered_cache/scheduler/lru_policy.cpp
+    p2p/tiered_cache/scheduler/client_scheduler.cpp
 )
 
 set(EXTRA_LIBS "")
@@ -38,6 +65,12 @@ if(USE_3FS)
     message(FATAL_ERROR "hf3fs_api_shared library not found in /usr/lib")
   endif()
   set(EXTRA_LIBS ${HF3FS_API_LIB})
+endif()
+
+# Ascend Cache Tier support (P2P client tiered_cache, optional)
+if(USE_ASCEND_CACHE_TIER)
+  list(APPEND MOONCAKE_STORE_SOURCES p2p/tiered_cache/tiers/ascend_tier.cpp)
+  message(STATUS "Ascend Cache Tier enabled")
 endif()
 
 # The cache_allocator library
@@ -73,6 +106,29 @@ if (USE_ASCEND_DIRECT)
     else()
         message(WARNING "Acl runtime header file is not exist")
     endif()
+endif()
+
+# Link Ascend ACL library for P2P tiered_cache ascend_tier if enabled
+if(USE_ASCEND_CACHE_TIER)
+  set(ASCEND_SEARCH_PATHS
+      $ENV{ASCEND_HOME}/lib64
+      /usr/local/Ascend/ascend-toolkit/latest/lib64
+      /usr/local/Ascend/nnrt/latest/lib64
+  )
+  find_library(ASCENDCL_LIB ascendcl PATHS ${ASCEND_SEARCH_PATHS} NO_DEFAULT_PATH)
+  if(NOT ASCENDCL_LIB)
+    message(WARNING "ascendcl library not found. Ascend cache tier will use fallback mode (no ACL).")
+  else()
+    message(STATUS "Found ascendcl library: ${ASCENDCL_LIB}")
+    target_link_libraries(mooncake_store PUBLIC ${ASCENDCL_LIB})
+    set(ASCEND_INCLUDE_PATHS
+        $ENV{ASCEND_HOME}/include
+        /usr/local/Ascend/ascend-toolkit/latest/include
+        /usr/local/Ascend/nnrt/latest/include
+    )
+    target_include_directories(mooncake_store PUBLIC ${ASCEND_INCLUDE_PATHS})
+    target_compile_definitions(mooncake_store PUBLIC USE_ASCEND_CACHE_TIER)
+  endif()
 endif()
 
 if (BUILD_SHARED_LIBS)

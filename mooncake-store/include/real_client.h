@@ -15,6 +15,7 @@
 #include "mutex.h"
 #include "utils.h"
 #include "rpc_types.h"
+#include "p2p_client_service.h"  // P2P deployment mode backend
 
 namespace mooncake {
 
@@ -82,6 +83,25 @@ class RealClient : public PyClient {
         // Real client does not support dummy setup
         return -1;
     };
+
+    /**
+     * @brief Setup the real client in P2P deployment mode.
+     *
+     * External API is additive (does not modify setup_real/setup_dummy).
+     * store_py reaches this via dynamic_pointer_cast<RealClient>.
+     */
+    int setup_p2p(
+        const std::string &local_hostname, const std::string &metadata_server,
+        const std::string &protocol, const std::string &rdma_devices,
+        const std::string &master_server_addr,
+        const std::string &tiered_backend_config,
+        uint16_t client_rpc_port, uint32_t rpc_thread_num,
+        size_t lock_shard_count, size_t route_cache_max_memory_bytes,
+        uint64_t route_cache_ttl_ms, const std::string &p2p_local_transfer_mode,
+        size_t local_memcpy_async_worker_num, uint16_t metrics_port,
+        bool enable_metrics_http, size_t async_sender_thread_count,
+        size_t async_max_batch_size, size_t async_route_queue_size,
+        const std::string &ipc_socket_path);
 
     int initAll(const std::string &protocol, const std::string &device_name,
                 size_t mount_segment_size = 1024 * 1024 * 16);  // Default 16MB
@@ -329,6 +349,23 @@ class RealClient : public PyClient {
         const std::shared_ptr<TransferEngine> &transfer_engine = nullptr,
         const std::string &ipc_socket_path = "", bool enable_offload = false);
 
+    /**
+     * @brief P2P setup internal (returns tl::expected).
+     * Builds P2PClientConfig and creates a standalone P2PClientService.
+     */
+    tl::expected<void, ErrorCode> setup_p2p_internal(
+        const std::string &local_hostname, const std::string &metadata_server,
+        const std::string &protocol, const std::string &rdma_devices,
+        const std::string &master_server_addr,
+        const std::string &tiered_backend_config,
+        uint16_t client_rpc_port, uint32_t rpc_thread_num,
+        size_t lock_shard_count, size_t route_cache_max_memory_bytes,
+        uint64_t route_cache_ttl_ms, const std::string &p2p_local_transfer_mode,
+        size_t local_memcpy_async_worker_num, uint16_t metrics_port,
+        bool enable_metrics_http, size_t async_sender_thread_count,
+        size_t async_max_batch_size, size_t async_route_queue_size,
+        const std::string &ipc_socket_path);
+
     tl::expected<void, ErrorCode> initAll_internal(
         const std::string &protocol, const std::string &device_name,
         size_t mount_segment_size = 1024 * 1024 * 16);
@@ -419,6 +456,12 @@ class RealClient : public PyClient {
     tl::expected<PingResponse, ErrorCode> ping(const UUID &client_id);
 
     std::unique_ptr<AutoPortBinder> port_binder_ = nullptr;
+
+    // ---- P2P deployment mode backend (additive) ----
+    // When mode_ == P2P, p2p_client_service_ is used instead of client_.
+    // All _internal methods dispatch on mode_.
+    enum class ClientMode { CENTRAL, P2P } mode_ = ClientMode::CENTRAL;
+    std::shared_ptr<P2PClientService> p2p_client_service_ = nullptr;
 
     struct SegmentDeleter {
         void operator()(void *ptr) {

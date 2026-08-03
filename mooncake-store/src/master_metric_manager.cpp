@@ -114,6 +114,24 @@ MasterMetricManager::MasterMetricManager()
       ping_failures_("master_ping_failures_total",
                      "Total number of failed ping requests"),
 
+      // Initialize P2P deployment mode Counters
+      heartbeat_requests_("master_heartbeat_requests_total",
+                          "Total number of Heartbeat requests received"),
+      heartbeat_failures_("master_heartbeat_failures_total",
+                          "Total number of failed Heartbeat requests"),
+      get_write_route_requests_("master_get_write_route_requests_total",
+                                "Total number of GetWriteRoute requests"),
+      get_write_route_failures_("master_get_write_route_failures_total",
+                                "Total number of failed GetWriteRoute requests"),
+      add_replica_requests_("master_add_replica_requests_total",
+                            "Total number of AddReplica requests"),
+      add_replica_failures_("master_add_replica_failures_total",
+                            "Total number of failed AddReplica requests"),
+      remove_replica_requests_("master_remove_replica_requests_total",
+                               "Total number of RemoveReplica requests"),
+      remove_replica_failures_("master_remove_replica_failures_total",
+                               "Total number of failed RemoveReplica requests"),
+
       // Initialize Batch Request Counters
       batch_exist_key_requests_(
           "master_batch_exist_key_requests_total",
@@ -217,6 +235,26 @@ MasterMetricManager::MasterMetricManager()
       batch_put_revoke_failed_items_(
           "master_batch_put_revoke_failed_items_total",
           "Total number of failed items in BatchPutRevoke requests"),
+
+      // Initialize P2P batch Counters
+      batch_remove_replica_requests_(
+          "master_batch_remove_replica_requests_total",
+          "Total number of BatchRemoveReplica requests received"),
+      batch_remove_replica_failures_(
+          "master_batch_remove_replica_failures_total",
+          "Total number of failed BatchRemoveReplica requests"),
+      batch_remove_replica_partial_successes_(
+          "master_batch_remove_replica_partial_successes_total",
+          "Total number of partially successful BatchRemoveReplica requests"),
+      batch_get_write_route_requests_(
+          "master_batch_get_write_route_requests_total",
+          "Total number of BatchGetWriteRoute requests received"),
+      batch_get_write_route_failures_(
+          "master_batch_get_write_route_failures_total",
+          "Total number of failed BatchGetWriteRoute requests"),
+      batch_get_write_route_partial_successes_(
+          "master_batch_get_write_route_partial_successes_total",
+          "Total number of partially successful BatchGetWriteRoute requests"),
 
       // Initialize cache hit rate metrics
       mem_cache_hit_nums_("mem_cache_hit_nums_",
@@ -601,6 +639,32 @@ void MasterMetricManager::inc_ping_failures(int64_t val) {
     ping_failures_.inc(val);
 }
 
+// P2P deployment mode operation statistics
+void MasterMetricManager::inc_heartbeat_requests(int64_t val) {
+    heartbeat_requests_.inc(val);
+}
+void MasterMetricManager::inc_heartbeat_failures(int64_t val) {
+    heartbeat_failures_.inc(val);
+}
+void MasterMetricManager::inc_get_write_route_requests(int64_t val) {
+    get_write_route_requests_.inc(val);
+}
+void MasterMetricManager::inc_get_write_route_failures(int64_t val) {
+    get_write_route_failures_.inc(val);
+}
+void MasterMetricManager::inc_add_replica_requests(int64_t val) {
+    add_replica_requests_.inc(val);
+}
+void MasterMetricManager::inc_add_replica_failures(int64_t val) {
+    add_replica_failures_.inc(val);
+}
+void MasterMetricManager::inc_remove_replica_requests(int64_t val) {
+    remove_replica_requests_.inc(val);
+}
+void MasterMetricManager::inc_remove_replica_failures(int64_t val) {
+    remove_replica_failures_.inc(val);
+}
+
 // Batch Operation Statistics (Counters)
 void MasterMetricManager::inc_batch_exist_key_requests(int64_t items) {
     batch_exist_key_requests_.inc(1);
@@ -694,6 +758,32 @@ void MasterMetricManager::inc_batch_put_revoke_partial_success(
     int64_t failed_items) {
     batch_put_revoke_partial_successes_.inc(1);
     batch_put_revoke_failed_items_.inc(failed_items);
+}
+
+// P2P batch operation statistics
+void MasterMetricManager::inc_batch_remove_replica_requests(int64_t items) {
+    batch_remove_replica_requests_.inc(items);
+}
+void MasterMetricManager::inc_batch_remove_replica_failures(
+    int64_t failed_items) {
+    batch_remove_replica_failures_.inc(failed_items);
+}
+void MasterMetricManager::inc_batch_remove_replica_partial_success(
+    int64_t failed_items) {
+    batch_remove_replica_partial_successes_.inc(1);
+    batch_remove_replica_failures_.inc(failed_items);
+}
+void MasterMetricManager::inc_batch_get_write_route_requests(int64_t items) {
+    batch_get_write_route_requests_.inc(items);
+}
+void MasterMetricManager::inc_batch_get_write_route_failures(
+    int64_t failed_items) {
+    batch_get_write_route_failures_.inc(failed_items);
+}
+void MasterMetricManager::inc_batch_get_write_route_partial_success(
+    int64_t failed_items) {
+    batch_get_write_route_partial_successes_.inc(1);
+    batch_get_write_route_failures_.inc(failed_items);
 }
 
 // PutStart Discard Metrics

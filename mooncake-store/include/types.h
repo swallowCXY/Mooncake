@@ -31,7 +31,8 @@ static constexpr bool DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS = true;
 static constexpr double DEFAULT_EVICTION_RATIO = 0.05;
 static constexpr double DEFAULT_EVICTION_HIGH_WATERMARK_RATIO = 0.95;
 static constexpr int64_t ETCD_MASTER_VIEW_LEASE_TTL = 5;    // in seconds
-static constexpr int64_t DEFAULT_CLIENT_LIVE_TTL_SEC = 10;  // in seconds
+static constexpr int64_t DEFAULT_CLIENT_LIVE_TTL_SEC = 10;     // in seconds
+static constexpr int64_t DEFAULT_CLIENT_CRASHED_TTL_SEC = 30;  // in seconds
 static const std::string DEFAULT_CLUSTER_ID = "mooncake_cluster";
 static const std::string DEFAULT_ROOT_FS_DIR = "";
 // default do not limit DFS usage, and use
@@ -162,6 +163,19 @@ enum class ErrorCode : int32_t {
     KEYS_ULTRA_LIMIT = -1203,          ///< Keys ultra limit.
     UNABLE_OFFLOAD = -1300,     ///< The offload functionality is not enabled
     UNABLE_OFFLOADING = -1301,  ///< Unable offloading.
+    // Extended errors (used by P2P deployment mode)
+    CLIENT_ALREADY_EXISTS = -104,  // Client already exists.
+    CLIENT_UNHEALTHY = -105,  // Client is not in a healthy state for the operation.
+    CAS_FAILED = -301,        // Compare and Swap failed (Optimistic Locking).
+    REPLICA_ALREADY_EXISTS = -708,  // Replica already exists.
+    REPLICA_NOT_FOUND = -709,       // Replica not found.
+    REPLICA_NUM_EXCEEDED = -710,    // Replica number exceeded.
+    EMPTY_REPLICAS = -1400,
+    TIER_NOT_FOUND = -1401,
+    DATA_COPY_FAILED = -1402,
+    SHUTTING_DOWN = -1500,  // Store is shutting down, rejecting new requests.
+    ASYNC_ENQUEUE_FAILED = -1501,  // Async metadata notifier enqueue failed.
+    INACCESSIBLE_MASTER = -1502
 };
 
 int32_t toInt(ErrorCode errorCode) noexcept;
@@ -172,6 +186,28 @@ const std::string& toString(ErrorCode errorCode) noexcept;
 inline std::ostream& operator<<(std::ostream& os,
                                 const ErrorCode& errorCode) noexcept {
     return os << toString(errorCode);
+}
+
+enum class DeploymentMode {
+    UNKNOWN = -1,
+    CENTRALIZATION = 0,
+    P2P,
+};
+
+inline std::ostream& operator<<(std::ostream& os,
+                                const DeploymentMode& mode) noexcept {
+    switch (mode) {
+        case DeploymentMode::CENTRALIZATION:
+            os << "CENTRALIZATION";
+            break;
+        case DeploymentMode::P2P:
+            os << "P2P";
+            break;
+        default:
+            os << "UNKNOWN";
+            break;
+    }
+    return os;
 }
 
 /**
@@ -189,6 +225,36 @@ const static uint64_t kMaxSliceSize =
 /**
  * @brief Represents a contiguous memory region
  */
+/**
+ * @enum MemoryType
+ * @brief Defines the physical storage medium type for a cache tier.
+ */
+enum class MemoryType { DRAM, NVME, ASCEND_NPU, UNKNOWN };
+
+static inline std::string MemoryTypeToString(MemoryType type) {
+    switch (type) {
+        case MemoryType::DRAM:
+            return "DRAM";
+        case MemoryType::NVME:
+            return "NVME";
+        case MemoryType::ASCEND_NPU:
+            return "ASCEND_NPU";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+struct P2PSegmentExtraData {
+    int priority = 0;
+    std::vector<std::string> tags;
+    MemoryType memory_type = MemoryType::DRAM;
+    size_t usage = 0;
+    YLT_REFL(P2PSegmentExtraData, priority, tags, memory_type, usage);
+};
+
+/**
+ * @brief Represents a contiguous storage region
+ */
 struct Segment {
     UUID id{0, 0};
     std::string name{};  // Logical segment name used for preferred allocation
@@ -197,8 +263,19 @@ struct Segment {
     // TE p2p endpoint (ip:port) for transport-only addressing
     std::string te_endpoint{};
     Segment() = default;
+
+    // P2P-only extra data (empty/unused in Centralization mode)
+    std::optional<P2PSegmentExtraData> p2p_extra;
+
+    bool IsP2PSegment() const { return p2p_extra.has_value(); }
+
+    P2PSegmentExtraData& GetP2PExtra() {
+        if (!p2p_extra) p2p_extra = P2PSegmentExtraData{};
+        return *p2p_extra;
+    }
+    const P2PSegmentExtraData& GetP2PExtra() const { return *p2p_extra; }
 };
-YLT_REFL(Segment, id, name, base, size, te_endpoint);
+YLT_REFL(Segment, id, name, base, size, te_endpoint, p2p_extra);
 
 /**
  * @brief Client status from the master's perspective
@@ -224,6 +301,60 @@ inline std::ostream& operator<<(std::ostream& os,
                                         : "UNKNOWN");
     return os;
 }
+
+/**
+ * @enum HAClientState
+ * @brief Client-side HA state for Master crash recovery (P2P mode).
+ *        FULL: normal operation
+ *        DEGRADED: Master unreachable, local-only mode
+ *        SYNCING: re-syncing metadata to restarted Master
+ */
+enum class HAClientState : int32_t {
+    FULL = 0,
+    DEGRADED = 1,
+    SYNCING = 2,
+};
+
+inline std::ostream& operator<<(std::ostream& os,
+                                const HAClientState& state) noexcept {
+    switch (state) {
+        case HAClientState::FULL:
+            os << "FULL";
+            break;
+        case HAClientState::DEGRADED:
+            os << "DEGRADED";
+            break;
+        case HAClientState::SYNCING:
+            os << "SYNCING";
+            break;
+        default:
+            os << "UNKNOWN";
+            break;
+    }
+    return os;
+}
+
+inline const char* toString(HAClientState state) noexcept {
+    switch (state) {
+        case HAClientState::FULL:
+            return "FULL";
+        case HAClientState::DEGRADED:
+            return "DEGRADED";
+        case HAClientState::SYNCING:
+            return "SYNCING";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+/**
+ * @enum HAEvent
+ * @brief Events that drive client-side HA state transitions (P2P mode).
+ */
+enum class HAEvent {
+    MASTER_UNREACHABLE,  // Consecutive heartbeat failures exceeded threshold
+    MASTER_RECONNECTED,  // Master connection restored.
+};
 
 enum class BufferAllocatorType {
     CACHELIB = 0,  // CachelibBufferAllocator
