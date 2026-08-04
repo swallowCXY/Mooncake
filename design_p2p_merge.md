@@ -363,3 +363,93 @@ main 缺 p2p 管理层文件，是因为 **p2p 分支重构了 segment/client/�
 - P2P 分支数 23，`p2p_client_service_->` 引用 24 ✓
 - `P2PQueryResult` 重命名一致 ✓
 - `pyclient.h` 未改（保 main Python API）✓
+
+---
+
+## 9. Linux 编译验证与修复记录 (2026-08-03 ~ 2026-08-04)
+
+> 环境：`vllm18-mooncake` 容器 (vllm/vllm-openai:v0.18.0-aarch64, Ubuntu 22.04, CUDA 12.9, Python 3.12)
+> 编译工具：cmake 4.4.0 (venv `/opt/mooncake-venv`), gcc 11, yalantinglibs (系统安装)
+> 构建命令：`cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE=/opt/mooncake-venv/bin/python3 -DBUILD_UNIT_TESTS=OFF`
+> 编译目标：`all` (mooncake_store + mooncake_master + mooncake_client + engine + store)
+
+### 9.1 Merge 过程
+
+- `git stash` 保存本地编译修复 → `git pull --ff-only origin feat/p2p-merge`（Fast-forward 到 `7880b8a0 realclient p2p distribution`）→ `git stash pop`
+- 冲突文件（2 个）：`p2p_client_service.h`（注释冲突，取 upstream）、`real_client.cpp`（`remove_internal` P2P 分支，取 upstream 显式 error handling 写法）
+- 残留 fix：`real_client.cpp` upstream 版本 `return {}` 缺分号（`;`），补上
+
+### 9.2 编译错误分类与修复
+
+#### 9.2.1 共享类型缺失（C1 遗留）
+
+| 错误 | 修复 |
+|------|------|
+| `ErrorCode::NOT_IMPLEMENTED` 未定义 | `types.h` ErrorCode 枚举追加 `NOT_IMPLEMENTED = -1600` |
+| P2P ErrorCode 值（`CLIENT_ALREADY_EXISTS`/`CLIENT_UNHEALTHY`/`CAS_FAILED`/`REPLICA_ALREADY_EXISTS`/`REPLICA_NOT_FOUND`/`REPLICA_NUM_EXCEEDED`/`EMPTY_REPLICAS`/`TIER_NOT_FOUND`/`DATA_COPY_FAILED`/`SHUTTING_DOWN`/`ASYNC_ENQUEUE_FAILED`/`INACCESSIBLE_MASTER`）在 `toString()` 中缺失 | `types.cpp` 补全所有 P2P ErrorCode 的 string 映射 |
+| `ObjectIterateStrategy` 未声明 | `p2p_types.h` 新增枚举 `{ORDERED, RANDOM, CAPACITY_PRIORITY}` + `operator<<` |
+| `ReplicaLocation` 未声明 | `p2p_types.h` 新增结构 `{std::string key; UUID tier_id; size_t size;}` |
+| `SpinRWLock` / `SpinRWLockLocker` 不存在 | `mutex.h` 新增 spin 读写锁（`std::atomic<uint32_t>` 实现）+ RAII locker |
+| `MutexLocker(Mutex*, bool)` 无匹配构造函数 | `mutex.h` 新增二参构造函数（`bool acquire` 控制是否立即 lock） |
+| `MOONCAKE_CPU_RELAX` 未声明 | `mutex.h` 新增宏（x86→`_mm_pause()`，其他→`std::this_thread::yield()`） |
+
+#### 9.2.2 Allocator 适配（C1 加法字段）
+
+| 错误 | 修复 |
+|------|------|
+| `AllocatedBuffer::getSegmentId()` 不存在 | `allocator.h`：`AllocatedBuffer` 构造新增 `const UUID& segment_id` + `segment_id_` 成员 + `getSegmentId()` 方法；`BufferAllocatorBase` 新增 `virtual UUID getSegmentId() const = 0`；`CachelibBufferAllocator`/`OffsetBufferAllocator` 构造新增 `const UUID& segment_id` + `segment_id_` 成员 + `getSegmentId()` override |
+| `allocator.cpp` 中 `make_unique<AllocatedBuffer>` 参数不足 | `allocator.cpp` 两处 allocate 传 `segment_id_` |
+| `segment.cpp` 构造 allocator 参数不足 | 传 `segment.id` 作为第5参数 |
+
+#### 9.2.3 P2P 代码适配
+
+| 错误 | 修复 |
+|------|------|
+| `p2p_master_client.cpp:3` `ylt/coro_rpc/impl/coro_rpcclient.hpp` 不存在 | 改为 `ylt/coro_rpc/impl/coro_rpc_client.hpp`（匹配系统安装的 yalantinglibs 版本） |
+| `QueryResult` 重定义（`client_service.h` vs `p2p_client_service.h`） | P2P 版重命名 `P2PQueryResult`（C8-Y upstream 已同步做此改名） |
+| `tiered_backend.cpp` `Segment.extra` 不存在 | 改为 `Segment.p2p_extra`（C1 加法字段） |
+
+#### 9.2.4 `std::unordered_map<UUID, ...>` 缺少 `boost::hash<UUID>`
+
+| 错误 | 修复 |
+|------|------|
+| `client_scheduler.h/.cpp` 多处 `unordered_map<UUID,...>` 使用 deleted 构造函数 | 全部补 `boost::hash<UUID>` + `#include <boost/functional/hash.hpp>` |
+| `tiered_backend.h/.cpp` 同上 | 补 `boost::hash<UUID>` |
+| `SchedulerPolicy::Decide` / `LRUPolicy::Decide` / `SimplePolicy::Decide` / `BuildReclaimPlan` / `CollectTierStats` 签名不匹配 | 统一返回类型/参数类型为 `unordered_map<UUID, ..., boost::hash<UUID>>`，`scheduler_policy.h` 补 boost include |
+
+#### 9.2.5 StorageBackend 接口补全
+
+| 错误 | 修复 |
+|------|------|
+| `StorageBackendInterface` 无 `MarkKeyDeleted` | `storage_backend.h`：interface 新增 `virtual MarkKeyDeleted(key)` (默认 no-op)；`StorageBackendAdaptor` 新增 override；`BucketStorageBackend` 新增 override |
+| `BucketStorageBackend` 无 `SelectBucketForEviction` / `EvictBucket` | `storage_backend.h`：新增两个 public 方法 + `bucket_valid_keys_` 成员；`storage_backend.cpp`：`BatchOffload` 中初始化 `bucket_valid_keys_`；`StorageBackendAdaptor::MarkKeyDeleted` 实现（删除文件+更新统计）；`BucketStorageBackend::MarkKeyDeleted`（移除 object_bucket_map_ 映射+递减 valid_keys）；`SelectBucketForEviction`（碎片率>50% 优先选最旧 bucket）；`EvictBucket`（移除 bucket 元数据+删除文件） |
+| 初始编辑误将 Bucket 方法插入 `OffsetAllocatorStorageBackend` | 重新定位到 `BucketStorageBackend` 类正确位置 |
+
+#### 9.2.6 RealClient / store_py 编译修复
+
+| 错误 | 修复 |
+|------|------|
+| `real_client.cpp:843` `expected<void>::map([](auto){})` 非法 | Upstream 已改为显式 `auto r = ...Remove(key); if (!r) return ...; return {};`（补缺失分号 `;`） |
+| `real_client_main.cpp:84` `std::optional<string>` 无法转为 `const string&` | `real_client.h` + `real_client.cpp` 中 `setup_p2p_internal` 的 `rdma_devices` 参数改为 `std::optional<std::string>`，内部使用改为 `rdma_devices && !rdma_devices->empty()` |
+| `store_py.cpp:1048` `PyClient` 无 `setup_p2p` | `self.store_->setup_p2p(...)` → `std::static_pointer_cast<RealClient>(self.store_)->setup_p2p(...)`（`setup_p2p` 在 `RealClient` 上，不在 `PyClient` 基类） |
+| `mooncake-integration` 缺少 `include/p2p/` include 路径 | `mooncake-integration/CMakeLists.txt` 新增 `include_directories("../mooncake-store/include/p2p")` |
+
+### 9.3 编译结果
+
+**全量编译通过，0 错误。** 产物：
+
+| 产物 | 状态 |
+|------|------|
+| `libmooncake_store.a` | ✅ |
+| `mooncake_master` | ✅ |
+| `mooncake_client` | ✅ |
+| `engine` (transfer engine) | ✅ |
+| `store.cpython-312-aarch64-linux-gnu.so` (Python 模块) | ✅ |
+
+### 9.4 说明
+
+- 单元测试因容器未装 gtest 暂以 `-DBUILD_UNIT_TESTS=OFF` 构建。`BUILD_UNIT_TESTS` 在 `common.cmake` 中默认为 ON，但 gtest 缺失导致 `default_config_test` 编译失败。需安装 gtest 后开启测试。
+- `extern/yalantinglibs` 非 git submodule，由 `dependencies.sh` 系统安装到 `/usr/local/include/ylt`。容器已预装，无需重新下载。
+- `extern/pybind11` 为 git submodule，rsync 时需排除 `extern/` 目录以避免覆盖已 checkout 的子模块。
+- `master_metric_manager` 的 `serialize_metrics`/`get_summary_string` 未追加 P2P 指标输出（C1 遗留），指标可用但不出现在 Prometheus 输出。
+- `InProcMasterConfig` 未加 `client_*_ttl_sec`（C1 遗留），非必需。

@@ -11,7 +11,7 @@ SimplePolicy::SimplePolicy(Config config) : config_(config) {}
 void SimplePolicy::SetFastTier(UUID id) { fast_tier_id_ = id; }
 
 tl::expected<std::vector<SchedAction>, ErrorCode> SimplePolicy::Decide(
-    const std::unordered_map<UUID, TierStats>& tier_stats,
+    const std::unordered_map<UUID, TierStats, boost::hash<UUID>>& tier_stats,
     const std::vector<KeyContext>& active_keys) {
     std::vector<SchedAction> actions;
 

@@ -14,6 +14,7 @@
 #include "transfer_engine.h"
 #include "types.h"
 #include "client_rpc_types.h"
+#include "p2p_types.h"
 
 namespace mooncake {
 

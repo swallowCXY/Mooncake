@@ -50,7 +50,20 @@ const std::string& toString(ErrorCode errorCode) noexcept {
         {ErrorCode::KEYS_EXCEED_BUCKET_LIMIT, "KEYS_EXCEED_BUCKET_LIMIT"},
         {ErrorCode::KEYS_ULTRA_LIMIT, "KEYS_ULTRA_LIMIT"},
         {ErrorCode::UNABLE_OFFLOAD, "UNABLE_OFFLOAD"},
-        {ErrorCode::UNABLE_OFFLOADING, "UNABLE_OFFLOADING"}};
+        {ErrorCode::UNABLE_OFFLOADING, "UNABLE_OFFLOADING"},
+        {ErrorCode::CLIENT_ALREADY_EXISTS, "CLIENT_ALREADY_EXISTS"},
+        {ErrorCode::CLIENT_UNHEALTHY, "CLIENT_UNHEALTHY"},
+        {ErrorCode::CAS_FAILED, "CAS_FAILED"},
+        {ErrorCode::REPLICA_ALREADY_EXISTS, "REPLICA_ALREADY_EXISTS"},
+        {ErrorCode::REPLICA_NOT_FOUND, "REPLICA_NOT_FOUND"},
+        {ErrorCode::REPLICA_NUM_EXCEEDED, "REPLICA_NUM_EXCEEDED"},
+        {ErrorCode::EMPTY_REPLICAS, "EMPTY_REPLICAS"},
+        {ErrorCode::TIER_NOT_FOUND, "TIER_NOT_FOUND"},
+        {ErrorCode::DATA_COPY_FAILED, "DATA_COPY_FAILED"},
+        {ErrorCode::SHUTTING_DOWN, "SHUTTING_DOWN"},
+        {ErrorCode::ASYNC_ENQUEUE_FAILED, "ASYNC_ENQUEUE_FAILED"},
+        {ErrorCode::INACCESSIBLE_MASTER, "INACCESSIBLE_MASTER"},
+        {ErrorCode::NOT_IMPLEMENTED, "NOT_IMPLEMENTED"}};
 
     auto it = errorCodeMap.find(errorCode);
     static const std::string unknownError = "UNKNOWN_ERROR";

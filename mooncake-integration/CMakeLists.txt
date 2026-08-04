@@ -12,6 +12,7 @@ endif()
 
 if (WITH_STORE)
     include_directories("../mooncake-store/include")
+    include_directories("../mooncake-store/include/p2p")
     include_directories("../mooncake-store/include/cachelib_memory_allocator")
 
     include_directories("../mooncake-store/include/cachelib_memory_allocator/include")

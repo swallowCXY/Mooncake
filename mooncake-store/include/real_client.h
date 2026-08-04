@@ -355,7 +355,8 @@ class RealClient : public PyClient {
      */
     tl::expected<void, ErrorCode> setup_p2p_internal(
         const std::string &local_hostname, const std::string &metadata_server,
-        const std::string &protocol, const std::string &rdma_devices,
+        const std::string &protocol,
+        std::optional<std::string> rdma_devices,
         const std::string &master_server_addr,
         const std::string &tiered_backend_config,
         uint16_t client_rpc_port, uint32_t rpc_thread_num,

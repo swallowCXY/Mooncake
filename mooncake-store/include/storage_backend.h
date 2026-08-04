@@ -132,6 +132,21 @@ class StorageBackendInterface {
             const std::vector<std::string>& keys,
             std::vector<StorageObjectMetadata>& metadatas)>& handler) = 0;
 
+    /**
+     * @brief Mark a key as deleted.
+     * @param key The object key that was deleted
+     * @return tl::expected<void, ErrorCode> indicating operation status
+     * @note FilePerKey physically removes the file and updates physical
+     * accounting. Bucket backend removes the live mapping but defers physical
+     * reclaim to bucket eviction.
+     */
+    virtual tl::expected<void, ErrorCode> MarkKeyDeleted(
+        const std::string& key) {
+        // Default implementation: no-op
+        (void)key;
+        return {};
+    }
+
     FileStorageConfig file_storage_config_;
 };
 
@@ -507,6 +522,9 @@ class StorageBackendAdaptor : public StorageBackendInterface {
             const std::vector<std::string>& keys,
             std::vector<StorageObjectMetadata>& metadatas)>& handler) override;
 
+    tl::expected<void, ErrorCode> MarkKeyDeleted(
+        const std::string& key) override;
+
    private:
     const FilePerKeyConfig file_per_key_config_;
 
@@ -664,6 +682,32 @@ class BucketStorageBackend : public StorageBackendInterface {
      */
     tl::expected<OffloadMetadata, ErrorCode> GetStoreMetadata();
 
+    /**
+     * @brief Mark a key as deleted (removes the live mapping; physical reclaim
+     * is deferred to bucket eviction).
+     * @param key The object key that was deleted
+     * @return tl::expected<void, ErrorCode> indicating operation status
+     */
+    tl::expected<void, ErrorCode> MarkKeyDeleted(
+        const std::string& key) override;
+
+    /**
+     * @brief Select a bucket for eviction based on fragmentation and age.
+     * @return tl::expected<int64_t, ErrorCode>
+     * - On success: the bucket ID to evict
+     * - On failure: error code (e.g., OBJECT_NOT_FOUND if no buckets exist)
+     */
+    tl::expected<int64_t, ErrorCode> SelectBucketForEviction() const;
+
+    /**
+     * @brief Evict an entire bucket by removing its data and metadata files.
+     * @param bucket_id The ID of the bucket to evict
+     * @return tl::expected<size_t, ErrorCode>
+     * - On success: the amount of space freed (in bytes)
+     * - On failure: error code
+     */
+    tl::expected<size_t, ErrorCode> EvictBucket(int64_t bucket_id);
+
    private:
     tl::expected<std::shared_ptr<BucketMetadata>, ErrorCode> BuildBucket(
         int64_t bucket_id,
@@ -731,6 +775,10 @@ class BucketStorageBackend : public StorageBackendInterface {
         mutex_) buckets_;
     int64_t GUARDED_BY(mutex_) next_bucket_ = -1;
     BucketBackendConfig bucket_backend_config_;
+
+    // Number of live (non-deleted) keys per bucket, used to compute
+    // fragmentation for eviction selection.
+    std::unordered_map<int64_t, int> GUARDED_BY(mutex_) bucket_valid_keys_;
 
     mutable Mutex offloading_mutex_;
     std::unordered_map<std::string, int64_t> GUARDED_BY(offloading_mutex_)

@@ -59,7 +59,7 @@ void TieredBackend::Destroy() {
         if (!tier) continue;
         const auto& info = tier_info_.at(id);
         Segment segment;
-        segment.extra = P2PSegmentExtraData{};
+        segment.p2p_extra = P2PSegmentExtraData{};
         segment.id = id;
         segment.name = "tier_" + std::to_string(id.first) + "_" +
                        std::to_string(id.second);
@@ -275,7 +275,7 @@ tl::expected<void, ErrorCode> TieredBackend::MountSegment(
     UUID id, size_t capacity, int priority,
     const std::vector<std::string>& tags, MemoryType memory_type) {
     Segment segment;
-    segment.extra = P2PSegmentExtraData{};
+    segment.p2p_extra = P2PSegmentExtraData{};
     segment.id = id;
     segment.name =
         "tier_" + std::to_string(id.first) + "_" + std::to_string(id.second);

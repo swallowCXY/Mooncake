@@ -328,7 +328,7 @@ int RealClient::setup_p2p(
 
 tl::expected<void, ErrorCode> RealClient::setup_p2p_internal(
     const std::string &local_hostname, const std::string &metadata_server,
-    const std::string &protocol, const std::string &rdma_devices,
+    const std::string &protocol, std::optional<std::string> rdma_devices,
     const std::string &master_server_addr,
     const std::string &tiered_backend_config,
     uint16_t client_rpc_port, uint32_t rpc_thread_num,
@@ -357,8 +357,8 @@ tl::expected<void, ErrorCode> RealClient::setup_p2p_internal(
     }
 
     std::optional<std::string> device_name =
-        (rdma_devices.empty() ? std::nullopt
-                              : std::make_optional(rdma_devices));
+        (rdma_devices && !rdma_devices->empty() ? rdma_devices
+                                                : std::nullopt);
 
     auto config = ClientConfigBuilder::build_p2p_real_client(
         this->local_hostname, metadata_server, protocol, device_name,

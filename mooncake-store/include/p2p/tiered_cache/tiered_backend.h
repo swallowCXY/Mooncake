@@ -9,11 +9,13 @@
 #include <shared_mutex>
 #include <optional>
 #include <functional>
+#include <boost/functional/hash.hpp>
 #include <json/value.h>
 
 #include "tiered_cache/tiers/cache_tier.h"
 #include "tiered_cache/data_copier.h"
 #include "tiered_cache/scheduler/stats_collector.h"
+#include "p2p_types.h"
 #include "rpc_types.h"
 
 namespace mooncake {
@@ -261,10 +263,11 @@ class TieredBackend {
 
    private:
     // Map from tier ID to the actual CacheTier instance.
-    std::unordered_map<UUID, std::shared_ptr<CacheTier>> tiers_;
+    std::unordered_map<UUID, std::shared_ptr<CacheTier>, boost::hash<UUID>>
+        tiers_;
 
     // Map from tier ID to static config info
-    std::unordered_map<UUID, TierInfo> tier_info_;
+    std::unordered_map<UUID, TierInfo, boost::hash<UUID>> tier_info_;
 
     // Sharded Metadata Index: Key -> Entry
     // Each shard has its own mutex for fine-grained locking.

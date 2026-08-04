@@ -175,7 +175,8 @@ enum class ErrorCode : int32_t {
     DATA_COPY_FAILED = -1402,
     SHUTTING_DOWN = -1500,  // Store is shutting down, rejecting new requests.
     ASYNC_ENQUEUE_FAILED = -1501,  // Async metadata notifier enqueue failed.
-    INACCESSIBLE_MASTER = -1502
+    INACCESSIBLE_MASTER = -1502,
+    NOT_IMPLEMENTED = -1600  // Operation not implemented.
 };
 
 int32_t toInt(ErrorCode errorCode) noexcept;

@@ -1,10 +1,41 @@
 #pragma once
 
 #include <ostream>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 
+#include "types.h"
+
 namespace mooncake {
+
+/**
+ * @brief Iteration strategy for walking over clients / keys.
+ */
+enum class ObjectIterateStrategy {
+    ORDERED = 0,          // Iterate in a deterministic, ordered fashion
+    RANDOM,               // Iterate in a random order
+    CAPACITY_PRIORITY,    // Iterate in order of available capacity
+};
+
+inline std::ostream& operator<<(std::ostream& os,
+                                const ObjectIterateStrategy& strategy) noexcept {
+    switch (strategy) {
+        case ObjectIterateStrategy::ORDERED:
+            os << "ORDERED";
+            break;
+        case ObjectIterateStrategy::RANDOM:
+            os << "RANDOM";
+            break;
+        case ObjectIterateStrategy::CAPACITY_PRIORITY:
+            os << "CAPACITY_PRIORITY";
+            break;
+        default:
+            os << "UNKNOWN";
+            break;
+    }
+    return os;
+}
 
 /**
  * @brief Client status from the P2P master's perspective.
@@ -35,5 +66,15 @@ inline std::ostream& operator<<(std::ostream& os,
                                         : "UNKNOWN");
     return os;
 }
+
+/**
+ * @brief Describes the location of a replica during key iteration.
+ *        Used by TieredBackend::ForEachKeyBatch() / DataManager::ForEachKeyBatch().
+ */
+struct ReplicaLocation {
+    std::string key;
+    UUID tier_id;
+    size_t size = 0;
+};
 
 }  // namespace mooncake

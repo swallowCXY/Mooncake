@@ -1189,6 +1189,50 @@ tl::expected<void, ErrorCode> StorageBackendAdaptor::ScanMeta(
     return {};
 }
 
+tl::expected<void, ErrorCode> StorageBackendAdaptor::MarkKeyDeleted(
+    const std::string& key) {
+    namespace fs = std::filesystem;
+
+    if (!storage_backend_) {
+        LOG(ERROR) << "Storage backend adaptor is not initialized";
+        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+    }
+
+    const std::string path = ResolvePath(key);
+    std::error_code ec;
+    if (!fs::exists(path, ec)) {
+        if (ec) {
+            LOG(ERROR) << "Failed to stat file for key deletion: key=" << key
+                       << ", path=" << path << ", error: " << ec.message();
+            return tl::make_unexpected(ErrorCode::FILE_NOT_FOUND);
+        }
+        return {};
+    }
+
+    const uint64_t file_size = fs::file_size(path, ec);
+    if (ec) {
+        LOG(ERROR) << "Failed to get file size before deletion: key=" << key
+                   << ", path=" << path << ", error: " << ec.message();
+        return tl::make_unexpected(ErrorCode::FILE_READ_FAIL);
+    }
+
+    storage_backend_->RemoveFile(path);
+
+    MutexLocker lock(&mutex_);
+    if (total_keys > 0) {
+        total_keys--;
+    }
+    if (total_size >= static_cast<int64_t>(file_size)) {
+        total_size -= static_cast<int64_t>(file_size);
+    } else {
+        LOG(WARNING) << "Per-key physical accounting underflow on delete: key="
+                     << key << ", tracked_bytes=" << total_size
+                     << ", file_bytes=" << file_size;
+        total_size = 0;
+    }
+    return {};
+}
+
 BucketIdGenerator::BucketIdGenerator(int64_t start) {
     if (start <= 0) {
         auto cur_time_stamp = time_gen();
@@ -1265,7 +1309,9 @@ tl::expected<int64_t, ErrorCode> BucketStorageBackend::BatchOffload(
     for (size_t i = 0; i < bucket->keys.size(); ++i) {
         object_bucket_map_.emplace(bucket->keys[i], std::move(metadatas[i]));
     }
+    int new_bucket_key_count = static_cast<int>(bucket->keys.size());
     buckets_.emplace(bucket_id, std::move(bucket));
+    bucket_valid_keys_[bucket_id] = new_bucket_key_count;
     return bucket_id;
 }
 
@@ -1975,6 +2021,131 @@ tl::expected<void, ErrorCode> BucketStorageBackend::HandleNext(
 tl::expected<bool, ErrorCode> BucketStorageBackend::HasNext() {
     MutexLocker locker(&iterator_mutex_);
     return next_bucket_ != 0;
+}
+
+tl::expected<void, ErrorCode> BucketStorageBackend::MarkKeyDeleted(
+    const std::string& key) {
+    SharedMutexLocker lock(&mutex_);
+
+    auto obj_it = object_bucket_map_.find(key);
+    if (obj_it == object_bucket_map_.end()) {
+        // Key not found, nothing to do
+        return {};
+    }
+
+    int64_t bucket_id = obj_it->second.bucket_id;
+
+    auto bucket_valid_it = bucket_valid_keys_.find(bucket_id);
+    if (bucket_valid_it != bucket_valid_keys_.end() &&
+        bucket_valid_it->second > 0) {
+        bucket_valid_it->second--;
+    }
+
+    // Remove the live mapping. Physical bytes remain accounted until the
+    // bucket is evicted.
+    object_bucket_map_.erase(obj_it);
+
+    return {};
+}
+
+tl::expected<int64_t, ErrorCode> BucketStorageBackend::SelectBucketForEviction()
+    const {
+    SharedMutexLocker lock(&mutex_, shared_lock);
+
+    if (buckets_.empty()) {
+        return tl::make_unexpected(ErrorCode::OBJECT_NOT_FOUND);
+    }
+
+    // Strategy: prioritize buckets with fragmentation > 50%, select oldest
+    constexpr float FRAG_THRESHOLD = 0.5f;
+    int64_t best_fragmented = -1;
+
+    for (const auto& [bucket_id, bucket_meta] : buckets_) {
+        int total_keys = static_cast<int>(bucket_meta->keys.size());
+        if (total_keys == 0) continue;
+
+        // Get valid key count from tracking map
+        int valid_keys = 0;
+        auto it = bucket_valid_keys_.find(bucket_id);
+        if (it != bucket_valid_keys_.end()) {
+            valid_keys = it->second;
+        }
+
+        float frag_ratio = 1.0f - static_cast<float>(valid_keys) / total_keys;
+
+        if (frag_ratio > FRAG_THRESHOLD) {
+            // Select oldest fragmented bucket (smallest bucket_id)
+            if (best_fragmented == -1 || bucket_id < best_fragmented) {
+                best_fragmented = bucket_id;
+            }
+        }
+    }
+
+    // If found fragmented bucket, return it
+    if (best_fragmented != -1) {
+        LOG(INFO) << "Selected fragmented bucket " << best_fragmented
+                  << " for eviction";
+        return best_fragmented;
+    }
+
+    // Otherwise, select oldest bucket
+    int64_t oldest_bucket = buckets_.begin()->first;
+    LOG(INFO) << "Selected oldest bucket " << oldest_bucket << " for eviction";
+    return oldest_bucket;
+}
+
+tl::expected<size_t, ErrorCode> BucketStorageBackend::EvictBucket(
+    int64_t bucket_id) {
+    size_t freed_size = 0;
+    size_t key_count = 0;
+
+    {
+        SharedMutexLocker lock(&mutex_);
+
+        auto bucket_it = buckets_.find(bucket_id);
+        if (bucket_it == buckets_.end()) {
+            LOG(ERROR) << "Bucket " << bucket_id << " not found";
+            return tl::make_unexpected(ErrorCode::OBJECT_NOT_FOUND);
+        }
+
+        auto bucket_meta = bucket_it->second;
+        key_count = bucket_meta->keys.size();
+
+        // Remove all live keys from object_bucket_map_ and calculate freed size
+        for (const auto& key : bucket_meta->keys) {
+            auto obj_it = object_bucket_map_.find(key);
+            if (obj_it == object_bucket_map_.end()) {
+                continue;
+            }
+            freed_size += obj_it->second.data_size;
+            object_bucket_map_.erase(obj_it);
+        }
+
+        buckets_.erase(bucket_it);
+        bucket_valid_keys_.erase(bucket_id);
+    }
+
+    auto data_path_res = GetBucketDataPath(bucket_id);
+    if (!data_path_res) {
+        LOG(ERROR) << "Failed to build data path for bucket " << bucket_id
+                   << ": " << data_path_res.error();
+        return tl::make_unexpected(data_path_res.error());
+    }
+
+    auto meta_path_res = GetBucketMetadataPath(bucket_id);
+    if (!meta_path_res) {
+        LOG(ERROR) << "Failed to build metadata path for bucket " << bucket_id
+                   << ": " << meta_path_res.error();
+        return tl::make_unexpected(meta_path_res.error());
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(data_path_res.value(), ec);
+    std::filesystem::remove(meta_path_res.value(), ec);
+
+    LOG(INFO) << "Evicted bucket " << bucket_id << " with " << key_count
+              << " keys, released " << freed_size << " live bytes";
+    return freed_size;
 }
 
 // ============================================================================

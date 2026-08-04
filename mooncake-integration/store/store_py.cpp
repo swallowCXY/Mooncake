@@ -1045,7 +1045,8 @@ PYBIND11_MODULE(store, m) {
                 (void)engine;  // P2P creates its own TransferEngine internally.
                 // Build a buffer allocator for local buffer management.
                 (void)local_buffer_size;
-                return self.store_->setup_p2p(
+                return std::static_pointer_cast<RealClient>(self.store_)
+                    ->setup_p2p(
                     local_hostname, metadata_server, protocol, rdma_devices,
                     master_server_addr, tiered_backend_config, client_rpc_port,
                     rpc_thread_num, static_cast<size_t>(lock_shard_count),

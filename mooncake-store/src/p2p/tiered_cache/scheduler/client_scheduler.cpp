@@ -214,8 +214,8 @@ void ClientScheduler::WorkerLoop() {
     }
 }
 
-std::unordered_map<UUID, TierStats> ClientScheduler::CollectTierStats() const {
-    std::unordered_map<UUID, TierStats> tier_stats_map;
+std::unordered_map<UUID, TierStats, boost::hash<UUID>> ClientScheduler::CollectTierStats() const {
+    std::unordered_map<UUID, TierStats, boost::hash<UUID>> tier_stats_map;
     for (const auto& [id, tier] : tiers_) {
         tier_stats_map[id] = {tier->GetCapacity(), tier->GetUsage()};
     }
@@ -434,7 +434,7 @@ void ClientScheduler::ExecuteActions(const std::vector<SchedAction>& actions) {
     }
 
     // Phase 2: Execute all MIGRATE actions
-    std::unordered_map<UUID, size_t> tiers_needing_eviction;
+    std::unordered_map<UUID, size_t, boost::hash<UUID>> tiers_needing_eviction;
 
     for (const auto& action : actions) {
         if (!running_) return;  // Fast exit on shutdown
@@ -580,7 +580,7 @@ bool ClientScheduler::TryFastReclaim(UUID tier_id, size_t required_bytes) {
 }
 
 ClientScheduler::PlannedReclaim ClientScheduler::BuildReclaimPlan(
-    UUID tier_id, const std::unordered_map<UUID, TierStats>& tier_stats,
+    UUID tier_id, const std::unordered_map<UUID, TierStats, boost::hash<UUID>>& tier_stats,
     const std::vector<KeyContext>& active_keys, bool require_existing_replica,
     size_t required_bytes) const {
     PlannedReclaim plan;

@@ -3,6 +3,16 @@
 
 #include <mutex>
 #include <shared_mutex>
+#include <atomic>
+#include <thread>
+
+// Hint to the CPU that we are in a spin-wait loop (no-op on non-x86).
+#if defined(__x86_64__)
+#include <immintrin.h>
+#define MOONCAKE_CPU_RELAX() _mm_pause()
+#else
+#define MOONCAKE_CPU_RELAX() std::this_thread::yield()
+#endif
 
 // Enable thread safety attributes only with clang.
 // The attributes can be safely erased when compiling with other compilers.
@@ -117,6 +127,15 @@ class SCOPED_CAPABILITY MutexLocker {
     // Acquire mu, implicitly acquire *this and associate it with mu.
     MutexLocker(Mutex* mu) ACQUIRE(mu) : mut(mu), locked(true) { mu->lock(); }
 
+    // Acquire mu only if `acquire` is true; otherwise leave it unlocked so that
+    // the caller can try to acquire it via TryLock().
+    MutexLocker(Mutex* mu, bool acquire) ACQUIRE(mu) : mut(mu), locked(false) {
+        if (acquire) {
+            mu->lock();
+            locked = true;
+        }
+    }
+
     // Release *this and all associated mutexes, if they are still held.
     ~MutexLocker() RELEASE() {
         if (locked) {
@@ -217,6 +236,132 @@ class SCOPED_CAPABILITY SharedMutexLocker {
     }
 
     // Release the mutex according to the current mode (exclusive or shared)
+    void unlock() RELEASE() {
+        if (!locked || !mut) return;
+        if (is_exclusive) {
+            mut->unlock();
+        } else {
+            mut->unlock_shared();
+        }
+        locked = false;
+    }
+};
+
+// A read-write lock implemented with a spin-wait (busy loop). Suitable for
+// short critical sections that are frequently accessed.
+class CAPABILITY("spin_rwlock") SpinRWLock {
+   private:
+    // state_ == 0                 : unlocked
+    // state_ has writer bit set   : writer holds the lock
+    // state_ == reader count      : readers hold the lock
+    std::atomic<uint32_t> state_{0};
+    static constexpr uint32_t kWriterBits = 0x80000000u;
+
+   public:
+    // Acquire the lock in exclusive (writer) mode.
+    void lock() ACQUIRE() {
+        for (;;) {
+            uint32_t expected = 0;
+            if (state_.compare_exchange_weak(expected, kWriterBits,
+                                             std::memory_order_acquire,
+                                             std::memory_order_relaxed)) {
+                return;
+            }
+            MOONCAKE_CPU_RELAX();
+        }
+    }
+
+    // Acquire the lock in shared (reader) mode.
+    void lock_shared() ACQUIRE_SHARED() {
+        for (;;) {
+            uint32_t cur = state_.load(std::memory_order_relaxed);
+            if ((cur & kWriterBits) != 0) {
+                MOONCAKE_CPU_RELAX();
+                continue;
+            }
+            if (state_.compare_exchange_weak(cur, cur + 1,
+                                             std::memory_order_acquire,
+                                             std::memory_order_relaxed)) {
+                return;
+            }
+            MOONCAKE_CPU_RELAX();
+        }
+    }
+
+    // Release the exclusive lock.
+    void unlock() RELEASE() {
+        state_.store(0, std::memory_order_release);
+    }
+
+    // Release the shared lock.
+    void unlock_shared() RELEASE_SHARED() {
+        state_.fetch_sub(1, std::memory_order_release);
+    }
+
+    // Try to acquire the lock in exclusive mode; returns true on success.
+    bool try_lock() TRY_ACQUIRE(true) {
+        uint32_t expected = 0;
+        return state_.compare_exchange_strong(expected, kWriterBits,
+                                              std::memory_order_acquire,
+                                              std::memory_order_relaxed);
+    }
+
+    // For negative capabilities.
+    const SpinRWLock& operator!() const { return *this; }
+};
+
+// RAII locker for SpinRWLock. Mirrors SharedMutexLocker's interface.
+class SCOPED_CAPABILITY SpinRWLockLocker {
+   private:
+    SpinRWLock* mut;
+    bool is_exclusive;
+    bool locked;
+
+   public:
+    // Constructor: Acquire the lock in exclusive mode.
+    explicit SpinRWLockLocker(SpinRWLock* mu) ACQUIRE(mu)
+        : mut(mu), is_exclusive(true), locked(true) {
+        if (mut) mut->lock();
+    }
+
+    // Constructor: Acquire the lock in shared mode.
+    SpinRWLockLocker(SpinRWLock* mu, const shared_lock_t&) ACQUIRE_SHARED(mu)
+        : mut(mu), is_exclusive(false), locked(true) {
+        if (mut) mut->lock_shared();
+    }
+
+    // Destructor: Automatically release the lock.
+    ~SpinRWLockLocker() RELEASE() {
+        if (locked && mut) {
+            if (is_exclusive) {
+                mut->unlock();
+            } else {
+                mut->unlock_shared();
+            }
+        }
+    }
+
+    // Prevent copying and assignment.
+    SpinRWLockLocker(const SpinRWLockLocker&) = delete;
+    SpinRWLockLocker& operator=(const SpinRWLockLocker&) = delete;
+
+    // Acquire the lock in exclusive mode.
+    void lock() ACQUIRE() {
+        if (!mut || locked) return;
+        mut->lock();
+        is_exclusive = true;
+        locked = true;
+    }
+
+    // Acquire the lock in shared mode.
+    void lock_shared() ACQUIRE_SHARED() {
+        if (!mut || locked) return;
+        mut->lock_shared();
+        is_exclusive = false;
+        locked = true;
+    }
+
+    // Release the lock according to the current mode.
     void unlock() RELEASE() {
         if (!locked || !mut) return;
         if (is_exclusive) {

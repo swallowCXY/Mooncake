@@ -1,6 +1,6 @@
 #include "p2p_master_client.h"
 
-#include <ylt/coro_rpc/impl/coro_rpcclient.hpp>
+#include <ylt/coro_rpc/impl/coro_rpc_client.hpp>
 #include <ylt/util/tl/expected.hpp>
 
 #include <glog/logging.h>

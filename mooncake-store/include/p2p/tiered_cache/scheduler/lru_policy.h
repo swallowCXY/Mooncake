@@ -25,7 +25,7 @@ class LRUPolicy : public SchedulerPolicy {
     bool IsFastTier(UUID id) const;
 
     tl::expected<std::vector<SchedAction>, ErrorCode> Decide(
-        const std::unordered_map<UUID, TierStats>& tier_stats,
+        const std::unordered_map<UUID, TierStats, boost::hash<UUID>>& tier_stats,
         const std::vector<KeyContext>& active_keys) override;
 
    private:

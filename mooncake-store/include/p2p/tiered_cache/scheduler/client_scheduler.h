@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <string_view>
+#include <boost/functional/hash.hpp>
 #include "mutex.h"
 #include "tiered_cache/scheduler/scheduler_policy.h"
 #include "tiered_cache/scheduler/stats_collector.h"
@@ -84,7 +85,9 @@ class ClientScheduler {
     bool TryFastReclaim(UUID tier_id, size_t required_bytes);
 
     PlannedReclaim BuildReclaimPlan(
-        UUID tier_id, const std::unordered_map<UUID, TierStats>& tier_stats,
+        UUID tier_id,
+        const std::unordered_map<UUID, TierStats, boost::hash<UUID>>&
+            tier_stats,
         const std::vector<KeyContext>& active_keys,
         bool require_existing_replica, size_t required_bytes) const;
 
@@ -98,7 +101,8 @@ class ClientScheduler {
         std::optional<UUID> pinned_tier_id = std::nullopt);
 
     // Build a fresh tier stats map for policy execution
-    std::unordered_map<UUID, TierStats> CollectTierStats() const;
+    std::unordered_map<UUID, TierStats, boost::hash<UUID>> CollectTierStats()
+        const;
 
     struct CachedKeyState {
         size_t size_bytes = 0;
@@ -109,7 +113,8 @@ class ClientScheduler {
         mutable Mutex mutex;
         std::unordered_map<std::string, CachedKeyState> key_cache
             GUARDED_BY(mutex);
-        std::unordered_map<UUID, std::unordered_set<std::string>>
+        std::unordered_map<UUID, std::unordered_set<std::string>,
+                           boost::hash<UUID>>
             tier_resident_keys GUARDED_BY(mutex);
     };
 
@@ -148,7 +153,7 @@ class ClientScheduler {
     std::thread worker_thread_;
 
     // Local view of tiers for policy input
-    std::unordered_map<UUID, CacheTier*> tiers_;
+    std::unordered_map<UUID, CacheTier*, boost::hash<UUID>> tiers_;
 
     // Scheduler-side metadata cache to avoid full backend scans each cycle
     std::array<KeyCacheShard, kKeyCacheShardCount> key_cache_shards_;
