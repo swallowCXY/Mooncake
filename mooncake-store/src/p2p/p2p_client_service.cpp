@@ -2020,7 +2020,7 @@ std::vector<tl::expected<bool, ErrorCode>> P2PClientService::BatchIsExist(
 // Query Operations
 // ============================================================================
 
-tl::expected<std::unique_ptr<QueryResult>, ErrorCode> P2PClientService::Query(
+tl::expected<std::unique_ptr<P2PQueryResult>, ErrorCode> P2PClientService::Query(
     const std::string& object_key, const ReadRouteConfig& config) {
     auto guard = AcquireInflightGuard();
     if (!guard.is_valid()) {
@@ -2041,16 +2041,16 @@ tl::expected<std::unique_ptr<QueryResult>, ErrorCode> P2PClientService::Query(
         return tl::unexpected(result.error());
     }
 
-    return std::make_unique<QueryResult>(std::move(result.value().replicas));
+    return std::make_unique<P2PQueryResult>(std::move(result.value().replicas));
 }
 
-std::vector<tl::expected<std::unique_ptr<QueryResult>, ErrorCode>>
+std::vector<tl::expected<std::unique_ptr<P2PQueryResult>, ErrorCode>>
 P2PClientService::BatchQuery(const std::vector<std::string>& object_keys,
                              const ReadRouteConfig& config) {
     auto guard = AcquireInflightGuard();
     if (!guard.is_valid()) {
         LOG(ERROR) << "client is shutting down";
-        std::vector<tl::expected<std::unique_ptr<QueryResult>, ErrorCode>>
+        std::vector<tl::expected<std::unique_ptr<P2PQueryResult>, ErrorCode>>
             results;
         results.reserve(object_keys.size());
         for (size_t i = 0; i < object_keys.size(); ++i) {
@@ -2059,11 +2059,11 @@ P2PClientService::BatchQuery(const std::vector<std::string>& object_keys,
         return results;
     }
     auto responses = master_client_.BatchGetReplicaList(object_keys, config);
-    std::vector<tl::expected<std::unique_ptr<QueryResult>, ErrorCode>> results;
+    std::vector<tl::expected<std::unique_ptr<P2PQueryResult>, ErrorCode>> results;
     results.reserve(responses.size());
     for (size_t i = 0; i < responses.size(); ++i) {
         if (responses[i]) {
-            results.emplace_back(std::make_unique<QueryResult>(
+            results.emplace_back(std::make_unique<P2PQueryResult>(
                 std::move(responses[i].value().replicas)));
         } else {
             results.emplace_back(tl::unexpected(responses[i].error()));

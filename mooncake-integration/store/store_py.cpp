@@ -213,13 +213,15 @@ class MooncakeStorePyWrapper {
    public:
     std::shared_ptr<PyClient> store_{nullptr};
     bool use_dummy_client_{false};
+    bool p2p_mode_{false};  // set true by setup_p2p_real_client
 
     MooncakeStorePyWrapper() = default;
 
     bool is_client_initialized() const {
-        // Check if the store and client are initialized
-        // Dummy client does not use client_ instance
-        return (store_ && (use_dummy_client_ || store_->client_));
+        // Check if the store and client are initialized.
+        // Dummy client does not use client_ instance.
+        // P2P mode: store_ (RealClient) holds a P2PClientService, not client_.
+        return (store_ && (use_dummy_client_ || p2p_mode_ || store_->client_));
     }
 
     std::string get_tp_key_name(const std::string &base_key, int rank) {
@@ -976,8 +978,9 @@ PYBIND11_MODULE(store, m) {
                const std::string &protocol = "tcp",
                const std::string &rdma_devices = "",
                const std::string &master_server_addr = "127.0.0.1:50051",
-               const py::object &engine = py::none()) {
+                const py::object &engine = py::none()) {
                 self.use_dummy_client_ = false;
+                self.p2p_mode_ = false;
                 self.store_ = std::make_shared<RealClient>();
                 ResourceTracker::getInstance().registerInstance(
                     std::dynamic_pointer_cast<PyClient>(self.store_));
@@ -999,8 +1002,9 @@ PYBIND11_MODULE(store, m) {
         .def(
             "setup_dummy",
             [](MooncakeStorePyWrapper &self, size_t mem_pool_size,
-               size_t local_buffer_size, const std::string &server_address) {
+                size_t local_buffer_size, const std::string &server_address) {
                 self.use_dummy_client_ = true;
+                self.p2p_mode_ = false;
                 self.store_ = std::make_shared<DummyClient>();
                 ResourceTracker::getInstance().registerInstance(
                     std::dynamic_pointer_cast<PyClient>(self.store_));
@@ -1011,6 +1015,65 @@ PYBIND11_MODULE(store, m) {
             },
             py::arg("mem_pool_size"), py::arg("local_buffer_size"),
             py::arg("server_address"))
+        .def(
+            "setup_p2p_real_client",
+            [](MooncakeStorePyWrapper &self,
+               const std::string &local_hostname,
+               const std::string &metadata_server,
+               const std::string &protocol = "tcp",
+               const std::string &rdma_devices = "",
+               const std::string &master_server_addr = "127.0.0.1:50051",
+               const std::string &tiered_backend_config = "",
+               size_t local_buffer_size = 0, py::object engine = py::none(),
+               uint16_t client_rpc_port = 12345,
+               uint32_t rpc_thread_num = 16,
+               uint64_t lock_shard_count = 1024,
+               const std::string &route_cache_max_memory = "300 MB",
+               uint64_t route_cache_ttl_ms = 5 * 60 * 1000,
+               const std::string &p2p_local_transfer_mode = "te",
+               uint64_t local_memcpy_async_worker_num = 32,
+               uint16_t metrics_port = 9003,
+               bool enable_metrics_http = true,
+               uint64_t async_sender_thread_count = 0,
+               uint64_t async_max_batch_size = 2000,
+               uint64_t async_route_queue_size = 0) {
+                self.use_dummy_client_ = false;
+                self.p2p_mode_ = true;
+                self.store_ = std::make_shared<RealClient>();
+                ResourceTracker::getInstance().registerInstance(
+                    std::dynamic_pointer_cast<PyClient>(self.store_));
+                (void)engine;  // P2P creates its own TransferEngine internally.
+                // Build a buffer allocator for local buffer management.
+                (void)local_buffer_size;
+                return self.store_->setup_p2p(
+                    local_hostname, metadata_server, protocol, rdma_devices,
+                    master_server_addr, tiered_backend_config, client_rpc_port,
+                    rpc_thread_num, static_cast<size_t>(lock_shard_count),
+                    string_to_byte_size(route_cache_max_memory),
+                    route_cache_ttl_ms, p2p_local_transfer_mode,
+                    static_cast<size_t>(local_memcpy_async_worker_num),
+                    metrics_port, enable_metrics_http,
+                    static_cast<size_t>(async_sender_thread_count),
+                    static_cast<size_t>(async_max_batch_size),
+                    static_cast<size_t>(async_route_queue_size), "");
+            },
+            py::arg("local_hostname"), py::arg("metadata_server"),
+            py::arg("protocol") = "tcp", py::arg("rdma_devices") = "",
+            py::arg("master_server_addr") = "127.0.0.1:50051",
+            py::arg("tiered_backend_config") = "",
+            py::arg("local_buffer_size") = 0, py::arg("engine") = py::none(),
+            py::arg("client_rpc_port") = 12345,
+            py::arg("rpc_thread_num") = 16,
+            py::arg("lock_shard_count") = 1024,
+            py::arg("route_cache_max_memory") = "300 MB",
+            py::arg("route_cache_ttl_ms") = 5 * 60 * 1000,
+            py::arg("p2p_local_transfer_mode") = "te",
+            py::arg("local_memcpy_async_worker_num") = 32,
+            py::arg("metrics_port") = 9003,
+            py::arg("enable_metrics_http") = true,
+            py::arg("async_sender_thread_count") = 0,
+            py::arg("async_max_batch_size") = 2000,
+            py::arg("async_route_queue_size") = 0)
         .def("init_all",
              [](MooncakeStorePyWrapper &self, const std::string &protocol,
                 const std::string &device_name,

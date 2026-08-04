@@ -327,3 +327,39 @@ main 缺 p2p 管理层文件，是因为 **p2p 分支重构了 segment/client/�
 - **RealClient** 加法：`mode_`(CENTRAL/P2P) + `p2p_client_service_` 成员 + `setup_p2p()` + 逐 `_internal` 方法分发 + config 翻译缝。
 - **`real_client_main.cpp`**：加 `--deployment_mode` flag。
 - **`store_py.cpp`**：加 `setup_p2p_real_client`（加法，store_py 下转型；**pyclient.h 不动**）。
+
+### C8-Y 执行完成（RealClient 加法分发）
+
+**修改文件**：
+1. `include/real_client.h`（加法）：
+   - `#include "p2p_client_service.h"`
+   - 加 `enum class ClientMode { CENTRAL, P2P } mode_`
+   - 加 `std::shared_ptr<P2PClientService> p2p_client_service_`
+   - 加 `int setup_p2p(...)` + `tl::expected<void,ErrorCode> setup_p2p_internal(...)`（public）
+2. `src/real_client.cpp`（加法分发，23 个 P2P 分支）：
+   - `setup_p2p`/`setup_p2p_internal`：`ClientConfigBuilder::build_p2p_real_client` → `P2PClientService::Create` → 存 `p2p_client_service_` + `mode_=P2P` + 建本地 `client_buffer_allocator_`（1GB）+ `RegisterLocalMemory` + 启 IPC。
+   - 逐 `_internal` 方法早期 P2P 分支：`put_internal`/`put_from_internal`/`put_batch_internal`/`put_parts_internal`/`put_from_with_metadata`/`batch_put_from_internal`/`batch_put_from_multi_buffers_internal`/`get_into_internal`/`get_buffer_internal`/`batch_get_into_internal`/`batch_get_into_multi_buffers_internal`/`batch_get_buffer_internal`/`register_buffer_internal`/`unregister_buffer_internal`/`remove_internal`/`removeByRegex_internal`/`removeAll_internal`/`isExist_internal`/`batchIsExist_internal`/`getSize_internal`/`get_replica_desc`/`batch_get_replica_desc`/`tearDownAll_internal`。
+   - config 翻译缝：写方法合成 `WriteConfig{WriteRouteRequestConfig{}}`（丢弃 ReplicateConfig 语义）；读方法合成 `ReadRouteConfig{}`。
+   - `tearDownAll_internal` P2P 分支：`p2p_client_service_->Stop();Destroy();reset()` + `client_buffer_allocator_.reset()`。
+   - `ping`/`map_shm_internal`/`unmap_shm_internal`/`setup_internal`/`initAll_internal` **不分发**（dummy TTL/IPC 在两模式共用；setup_internal/initAll 是 central 专用）。
+3. `include/p2p/p2p_client_service.h` + `src/p2p/p2p_client_service.cpp`（C8-partial 微调）：`QueryResult` → `P2PQueryResult`（避免与 main `client_service.h::QueryResult` 同名冲突）。
+4. `src/real_client_main.cpp`（加法）：`--deployment_mode` + P2P flags + main() 二选一分发（P2P→`setup_p2p_internal`；central→`setup_internal`）。
+5. `mooncake-integration/store/store_py.cpp`（加法）：`setup_p2p_real_client` 方法 + `p2p_mode_` 标志 + `is_client_initialized()` 兼容 P2P（`store_->client_` 为 null 时 P2P 仍视为 initialized）。现有 `setup`/`setup_dummy`/`pub_tensor_with_tp` 系列等 **不动**（保 main Python API）。
+
+**冲突点与解决**：
+- `QueryResult` 同名冲突（main `client_service.h` vs p2p `p2p_client_service.h`）→ p2p 版重命名 `P2PQueryResult`（`Query`/`BatchQuery` 返回 `unique_ptr<P2PQueryResult>`）。
+- `store_->client_` 为 null（P2P 模式）→ `is_client_initialized()` 加 `p2p_mode_` 短路。
+- P2P `Get(key, allocator, ...)` 需非空 allocator → `setup_p2p_internal` 建 1GB `client_buffer_allocator_` + `RegisterLocalMemory`。
+
+**风险项（待 Linux 编译验证）**：
+1. **config 翻译缝**：`ReplicateConfig` 语义（replica_num/with_soft_pin/preferred_segments/prefer_alloc_in_same_node）在 P2P 路径**全部丢弃**（合成默认 `WriteRouteRequestConfig{}`）。P2P 副本数由 master `max_replicas_per_key` 管。**架构师已接受**。
+2. **transfer_engine API 漂移**：`P2PClientService`（C8-partial）+ `setup_p2p_internal` 重度依赖 transfer_engine → 编译期修。
+3. **P2P dummy client 语义**：`ping` 在 P2P 模式仍用本地 TTL 队列（不触 master），dummy client monitor 共用。P2P 模式下 dummy client 行为未完全验证。
+4. **`store_py` 跨模块**：mooncake-integration 需 include `include/p2p/` 路径（CMake include 已加）。
+5. **C7+C8-partial 依赖链**：P2PClientService → data_manager/route_cache/peer_client/.../transfer_engine 需全部编译通过。
+6. **`put_internal` P2P 分支**：用 `client_buffer_allocator` 临时分配 buffer 持有 value bytes，`split_into_slices` 接管 handle；Put 同步 Wait 后 buffer 释放。若 P2P Put 异步持有 buffer 超出作用域需复核（P2PClientService::Put 内 `task_handle_ptr.value()->Wait()` 同步）。
+
+**验证（grep）**：
+- P2P 分支数 23，`p2p_client_service_->` 引用 24 ✓
+- `P2PQueryResult` 重命名一致 ✓
+- `pyclient.h` 未改（保 main Python API）✓

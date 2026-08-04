@@ -378,8 +378,24 @@ tl::expected<void, ErrorCode> RealClient::setup_p2p_internal(
     p2p_client_service_ = *p2p_opt;
     mode_ = ClientMode::P2P;
 
-    // RealClient's client_buffer_allocator_ is not used by the P2P path
-    // (P2PClientService manages its own buffers via DataManager). Keep it null.
+    // P2PClientService::Get(key, allocator, config) allocates a receive buffer
+    // via the supplied allocator, so we must provide one. Use a default-sized
+    // local buffer allocator (mirrors central setup_internal behavior).
+    const size_t p2p_local_buffer_size = 1024 * 1024 * 1024;  // 1GB default
+    const bool should_use_hugepage =
+        use_hugepage_ && this->protocol != "ascend";
+    client_buffer_allocator_ = ClientBufferAllocator::create(
+        p2p_local_buffer_size, this->protocol, should_use_hugepage);
+    if (client_buffer_allocator_) {
+        auto result = p2p_client_service_->RegisterLocalMemory(
+            client_buffer_allocator_->getBase(), p2p_local_buffer_size,
+            kWildcardLocation, false, true);
+        if (!result.has_value()) {
+            LOG(ERROR) << "Failed to register local memory for P2P: "
+                       << toString(result.error());
+            return tl::unexpected(result.error());
+        }
+    }
 
     // Start IPC server to accept FD from dummy clients (shared with central)
     if (!ipc_socket_path_.empty()) {
@@ -429,6 +445,7 @@ tl::expected<void, ErrorCode> RealClient::tearDownAll_internal() {
             p2p_client_service_->Destroy();
             p2p_client_service_.reset();
         }
+        client_buffer_allocator_.reset();
         mode_ = ClientMode::CENTRAL;
         port_binder_.reset();
         local_hostname = "";
@@ -840,7 +857,9 @@ tl::expected<void, ErrorCode> RealClient::remove_internal(
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
         }
         // P2P Remove is a no-op (returns OK). See P2PClientService::Remove.
-        return p2p_client_service_->Remove(key).map([](auto) {});
+        auto r = p2p_client_service_->Remove(key);
+        if (!r) return tl::unexpected(r.error());
+        return {};
     }
     if (!client_) {
         LOG(ERROR) << "Client is not initialized";
@@ -1484,6 +1503,14 @@ tl::expected<int64_t, ErrorCode> RealClient::get_into_internal(
     const std::string &key, void *buffer, size_t size) {
     // NOTE: The buffer address must be previously registered with
     // register_buffer() for zero-copy RDMA operations to work correctly
+    if (mode_ == ClientMode::P2P) {
+        if (!p2p_client_service_) {
+            LOG(ERROR) << "P2P client is not initialized";
+            return tl::unexpected(ErrorCode::INVALID_PARAMS);
+        }
+        return p2p_client_service_->Get(key, {buffer}, {size},
+                                        ReadRouteConfig{});
+    }
     if (!client_) {
         LOG(ERROR) << "Client is not initialized";
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
@@ -1625,6 +1652,33 @@ std::vector<tl::expected<void, ErrorCode>> RealClient::batch_put_from_internal(
         LOG(ERROR) << "prefer_alloc_in_same_node is not supported.";
         return std::vector<tl::expected<void, ErrorCode>>(
             keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+    }
+    if (mode_ == ClientMode::P2P) {
+        if (!p2p_client_service_) {
+            LOG(ERROR) << "P2P client is not initialized";
+            return std::vector<tl::expected<void, ErrorCode>>(
+                keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+        }
+        if (keys.size() != buffers.size() || keys.size() != sizes.size()) {
+            LOG(ERROR) << "Mismatched sizes for keys, buffers, and sizes";
+            return std::vector<tl::expected<void, ErrorCode>>(
+                keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+        }
+        std::vector<std::vector<Slice>> ordered_batched_slices;
+        ordered_batched_slices.reserve(keys.size());
+        for (size_t i = 0; i < keys.size(); ++i) {
+            std::vector<Slice> slices;
+            uint64_t off = 0;
+            while (off < sizes[i]) {
+                auto chunk = std::min(sizes[i] - off, kMaxSliceSize);
+                slices.emplace_back(Slice{static_cast<char *>(buffers[i]) + off,
+                                          chunk});
+                off += chunk;
+            }
+            ordered_batched_slices.emplace_back(std::move(slices));
+        }
+        return p2p_client_service_->BatchPut(
+            keys, ordered_batched_slices, WriteConfig{WriteRouteRequestConfig{}});
     }
     if (!client_) {
         LOG(ERROR) << "Client is not initialized";
@@ -1818,6 +1872,31 @@ RealClient::batch_get_into_internal(const std::vector<std::string> &keys,
                                     const std::vector<void *> &buffers,
                                     const std::vector<size_t> &sizes) {
     // Validate preconditions
+    if (mode_ == ClientMode::P2P) {
+        if (!p2p_client_service_) {
+            LOG(ERROR) << "P2P client is not initialized";
+            return std::vector<tl::expected<int64_t, ErrorCode>>(
+                keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+        }
+        if (keys.size() != buffers.size() || keys.size() != sizes.size()) {
+            LOG(ERROR) << "Input vector sizes mismatch: keys=" << keys.size()
+                       << ", buffers=" << buffers.size()
+                       << ", sizes=" << sizes.size();
+            return std::vector<tl::expected<int64_t, ErrorCode>>(
+                keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+        }
+        // P2P: each key has a single flat buffer → wrap as one-element vector.
+        std::vector<std::vector<void *>> all_buffers;
+        std::vector<std::vector<size_t>> all_sizes;
+        all_buffers.reserve(keys.size());
+        all_sizes.reserve(keys.size());
+        for (size_t i = 0; i < keys.size(); ++i) {
+            all_buffers.emplace_back(std::vector<void *>{buffers[i]});
+            all_sizes.emplace_back(std::vector<size_t>{sizes[i]});
+        }
+        return p2p_client_service_->BatchGet(keys, all_buffers, all_sizes,
+                                             ReadRouteConfig{}, false);
+    }
     if (!client_) {
         LOG(ERROR) << "Client is not initialized";
         return std::vector<tl::expected<int64_t, ErrorCode>>(
@@ -1983,6 +2062,41 @@ int RealClient::put_from_with_metadata(const std::string &key, void *buffer,
         LOG(ERROR) << "prefer_alloc_in_same_node is not supported.";
         return -1;
     }
+    if (mode_ == ClientMode::P2P) {
+        if (!p2p_client_service_) {
+            LOG(ERROR) << "P2P client is not initialized";
+            return -1;
+        }
+        if (size == 0 && metadata_size == 0) {
+            LOG(WARNING) << "Attempting to put empty data for key: " << key;
+            return 0;
+        }
+        std::vector<Slice> slices;
+        uint64_t metadata_offset = 0;
+        while (metadata_offset < metadata_size) {
+            auto chunk =
+                std::min(metadata_size - metadata_offset, kMaxSliceSize);
+            slices.emplace_back(Slice{
+                static_cast<char *>(metadata_buffer) + metadata_offset,
+                chunk});
+            metadata_offset += chunk;
+        }
+        uint64_t offset = 0;
+        while (offset < size) {
+            auto chunk = std::min(size - offset, kMaxSliceSize);
+            slices.emplace_back(
+                Slice{static_cast<char *>(buffer) + offset, chunk});
+            offset += chunk;
+        }
+        auto put_result = p2p_client_service_->Put(
+            key, slices, WriteConfig{WriteRouteRequestConfig{}});
+        if (!put_result) {
+            LOG(ERROR) << "P2P Put operation failed with error: "
+                       << toString(put_result.error());
+            return -toInt(put_result.error());
+        }
+        return 0;
+    }
     if (!client_) {
         LOG(ERROR) << "Client is not initialized";
         return -1;
@@ -2051,6 +2165,35 @@ RealClient::batch_put_from_multi_buffers_internal(
     const std::vector<std::vector<void *>> &all_buffers,
     const std::vector<std::vector<size_t>> &all_sizes,
     const ReplicateConfig &config) {
+    if (mode_ == ClientMode::P2P) {
+        if (!p2p_client_service_) {
+            LOG(ERROR) << "P2P client is not initialized";
+            return std::vector<tl::expected<void, ErrorCode>>(
+                keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+        }
+        if ((keys.size() != all_buffers.size()) ||
+            (all_buffers.size() != all_sizes.size())) {
+            LOG(ERROR) << "Mismatched sizes for keys, buffers, and sizes";
+            return std::vector<tl::expected<void, ErrorCode>>(
+                keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+        }
+        std::vector<std::vector<Slice>> batched_slices(keys.size());
+        for (size_t i = 0; i < all_buffers.size(); ++i) {
+            const auto &buffers = all_buffers[i];
+            const auto &sizes = all_sizes[i];
+            if (buffers.size() != sizes.size()) {
+                LOG(ERROR) << "Mismatched buffers and sizes of key:" << keys[i];
+                return std::vector<tl::expected<void, ErrorCode>>(
+                    keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+            }
+            batched_slices[i].reserve(buffers.size());
+            for (size_t j = 0; j < buffers.size(); ++j) {
+                batched_slices[i].emplace_back(Slice{buffers[j], sizes[j]});
+            }
+        }
+        return p2p_client_service_->BatchPut(
+            keys, batched_slices, WriteConfig{WriteRouteRequestConfig{}});
+    }
     if (!client_) {
         LOG(ERROR) << "Client is not initialized";
         return std::vector<tl::expected<void, ErrorCode>>(
@@ -2110,6 +2253,25 @@ RealClient::batch_get_into_multi_buffers_internal(
     const std::vector<std::vector<size_t>> &all_sizes,
     bool prefer_alloc_in_same_node) {
     // Validate preconditions
+    if (mode_ == ClientMode::P2P) {
+        if (!p2p_client_service_) {
+            LOG(ERROR) << "P2P client is not initialized";
+            return std::vector<tl::expected<int64_t, ErrorCode>>(
+                keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+        }
+        if (keys.size() != all_buffers.size() ||
+            keys.size() != all_sizes.size()) {
+            LOG(ERROR) << "Input vector sizes mismatch: keys=" << keys.size()
+                       << ", buffers=" << all_buffers.size()
+                       << ", sizes=" << all_sizes.size();
+            return std::vector<tl::expected<int64_t, ErrorCode>>(
+                keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+        }
+        // P2P ignores prefer_alloc_in_same_node semantics (central-only).
+        return p2p_client_service_->BatchGet(keys, all_buffers, all_sizes,
+                                             ReadRouteConfig{},
+                                             prefer_alloc_in_same_node);
+    }
     if (!client_) {
         LOG(ERROR) << "Client is not initialized";
         return std::vector<tl::expected<int64_t, ErrorCode>>(
@@ -2431,6 +2593,25 @@ void RealClient::ipc_server_func() {
 
 std::vector<Replica::Descriptor> RealClient::get_replica_desc(
     const std::string &key) {
+    if (mode_ == ClientMode::P2P) {
+        if (!p2p_client_service_) {
+            LOG(ERROR) << "P2P client is not initialized";
+            return {};
+        }
+        auto query_result = p2p_client_service_->Query(key);
+        if (!query_result) {
+            if (query_result.error() == ErrorCode::OBJECT_NOT_FOUND ||
+                query_result.error() == ErrorCode::REPLICA_IS_NOT_READY) {
+                LOG(ERROR) << "Object not found for key: " << key;
+            } else {
+                LOG(ERROR) << "Query failed for key: " << key
+                           << " with error: "
+                           << toString(query_result.error());
+            }
+            return {};
+        }
+        return query_result.value()->replicas;
+    }
     auto query_result = client_->Query(key);
     if (!query_result) {
         std::vector<Replica::Descriptor> replica_list = {};
@@ -2453,8 +2634,30 @@ std::vector<Replica::Descriptor> RealClient::get_replica_desc(
 
 std::map<std::string, std::vector<Replica::Descriptor>>
 RealClient::batch_get_replica_desc(const std::vector<std::string> &keys) {
-    auto query_results = client_->BatchQuery(keys);
     std::map<std::string, std::vector<Replica::Descriptor>> replica_map;
+    if (mode_ == ClientMode::P2P) {
+        if (!p2p_client_service_) {
+            LOG(ERROR) << "P2P client is not initialized";
+            return replica_map;
+        }
+        auto query_results = p2p_client_service_->BatchQuery(keys);
+        if (query_results.size() != keys.size()) {
+            LOG(ERROR) << "Batch query response size mismatch: expected "
+                       << keys.size() << ", got " << query_results.size();
+            return replica_map;
+        }
+        for (size_t i = 0; i < query_results.size(); ++i) {
+            if (query_results[i]) {
+                replica_map[keys[i]] = query_results[i].value()->replicas;
+            } else {
+                LOG(ERROR) << "batch_get_replica failed for key: " << keys[i]
+                           << " with error: "
+                           << toString(query_results[i].error());
+            }
+        }
+        return replica_map;
+    }
+    auto query_results = client_->BatchQuery(keys);
     if (query_results.size() != keys.size()) {
         LOG(ERROR) << "Batch query response size mismatch in "
                       "batch_get_allocated_buffer_desc: expected "

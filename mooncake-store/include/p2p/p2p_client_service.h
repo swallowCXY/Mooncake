@@ -43,21 +43,23 @@ namespace mooncake {
 using WriteConfig = std::variant<ReplicateConfig, WriteRouteRequestConfig>;
 
 /**
- * @brief Result of a query operation containing replica information
+ * @brief Result of a query operation containing replica information (P2P).
+ * Renamed from QueryResult to avoid clash with central client_service.h's
+ * QueryResult (which carries lease_timeout).
  */
-class QueryResult {
+class P2PQueryResult {
    public:
     const std::vector<Replica::Descriptor> replicas;
 
-    explicit QueryResult(std::vector<Replica::Descriptor>&& replicas_param)
+    explicit P2PQueryResult(std::vector<Replica::Descriptor>&& replicas_param)
         : replicas(std::move(replicas_param)) {}
 
-    ~QueryResult() = default;
+    ~P2PQueryResult() = default;
 
-    QueryResult(const QueryResult&) = delete;
-    QueryResult& operator=(const QueryResult&) = delete;
-    QueryResult(QueryResult&&) = default;
-    QueryResult& operator=(QueryResult&&) = default;
+    P2PQueryResult(const P2PQueryResult&) = delete;
+    P2PQueryResult& operator=(const P2PQueryResult&) = delete;
+    P2PQueryResult(P2PQueryResult&&) = default;
+    P2PQueryResult& operator=(P2PQueryResult&&) = default;
 };
 
 /**
@@ -100,10 +102,10 @@ class P2PClientService {
     DeploymentMode deployment_mode() const { return DeploymentMode::P2P; }
 
     // ---- Query / Get / Put (P2P) ----
-    tl::expected<std::unique_ptr<QueryResult>, ErrorCode> Query(
+    tl::expected<std::unique_ptr<P2PQueryResult>, ErrorCode> Query(
         const std::string& object_key, const ReadRouteConfig& config = {});
 
-    std::vector<tl::expected<std::unique_ptr<QueryResult>, ErrorCode>>
+    std::vector<tl::expected<std::unique_ptr<P2PQueryResult>, ErrorCode>>
     BatchQuery(const std::vector<std::string>& object_keys,
                const ReadRouteConfig& config = {});
 
