@@ -1,0 +1,61 @@
+#pragma once
+
+#include "client_meta.h"
+#include "heartbeat_type.h"
+#include "p2p_rpc_types.h"
+#include "p2p_segment_manager.h"
+
+namespace mooncake {
+class P2PClientMeta final : public ClientMeta {
+   public:
+    P2PClientMeta(const UUID& client_id, const std::string& ip_address,
+                  uint16_t rpc_port);
+
+    std::shared_ptr<P2PSegmentManager> GetSegmentManager() override;
+    auto QueryIp(const UUID& client_id)
+        -> tl::expected<std::vector<std::string>, ErrorCode> override;
+
+    auto UpdateSegmentUsages(const std::vector<TierUsageInfo>& usages)
+        -> SyncSegmentMetaResult;
+
+    size_t GetAvailableCapacity() const;
+
+    const std::string& get_ip_address() const { return ip_address_; }
+    uint16_t get_rpc_port() const { return rpc_port_; }
+
+   public:
+    /**
+     * @brief A wrapper function of collecting write route candidates from this
+     *        client in ForEachClient
+     */
+    auto CollectWriteRouteCandidates(const WriteRouteRequest& req,
+                                     std::vector<WriteCandidate>& candidates)
+        -> tl::expected<bool, ErrorCode>;
+
+   public:
+    void DoOnDisconnected() override {}
+    void DoOnRecovered() override {}
+
+    // HA sync tracking
+    void SetSyncing(bool syncing) {
+        is_syncing_.store(syncing, std::memory_order_release);
+    }
+    bool IsSyncing() const {
+        return is_syncing_.load(std::memory_order_acquire);
+    }
+
+   private:
+    static constexpr size_t INF_PRIORITY = 10000;
+
+    std::string ip_address_;
+    uint16_t rpc_port_ = 0;
+    std::shared_ptr<P2PSegmentManager> segment_manager_;
+
+    mutable SpinRWLock capacity_mutex_;
+    size_t client_capacity_ GUARDED_BY(capacity_mutex_) = 0;
+    size_t client_usage_ GUARDED_BY(capacity_mutex_) = 0;
+
+    std::atomic<bool> is_syncing_{false};
+};
+
+}  // namespace mooncake

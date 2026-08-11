@@ -11,7 +11,7 @@
 
 - **Central master 零改动**：main 的 `master_service.{h,cpp}`、`master_client.{h,cpp}`、`rpc_service.{h,cpp}` 原样保留。
 - **取消 master 基类**：p2p 分支的抽象基类 `MasterService` 逻辑扁平化进 `P2PMasterService`，去 virtual/override。
-- **P2P 代码迁入 `include/p2p/`、`src/p2p/`**，与 central 物理隔离。
+- **P2P 代码迁入 `include/p2p/`、`src/p2p/`**，与 central 物理隔离。内部再按 master/client 分两个子目录（见 §10）。
 - **共享头最小合并**：仅 `types.h`/`replica.h`/`master_config.h`/`default_config.h`/`master_metric_manager.h` 加必需符号；`rpc_types.h` 不动。
 
 ## 2. 根因与冲突点（已核实）
@@ -453,3 +453,93 @@ main 缺 p2p 管理层文件，是因为 **p2p 分支重构了 segment/client/�
 - `extern/pybind11` 为 git submodule，rsync 时需排除 `extern/` 目录以避免覆盖已 checkout 的子模块。
 - `master_metric_manager` 的 `serialize_metrics`/`get_summary_string` 未追加 P2P 指标输出（C1 遗留），指标可用但不出现在 Prometheus 输出。
 - `InProcMasterConfig` 未加 `client_*_ttl_sec`（C1 遗留），非必需。
+
+---
+
+## 10. P2P 目录重组：按 master/client 拆分 (2026-08-11)
+
+### 动机
+
+原始方案将所有 P2P 文件平铺在 `include/p2p/` 和 `src/p2p/` 下，随着文件增多（54 个文件），master 侧和 client 侧的代码混杂在一起，不利于维护和 code review。
+
+### 重组方案
+
+在 `include/p2p/` 和 `src/p2p/` 下新建 `master/` 和 `client/` 子目录，按**部署角色**分类：
+
+```
+mooncake-store/
+├── include/p2p/
+│   ├── heartbeat_type.h          # 共享
+│   ├── p2p_rpc_types.h           # 共享
+│   ├── p2p_types.h               # 共享
+│   ├── master/
+│   │   ├── client_manager.h
+│   │   ├── client_meta.h
+│   │   ├── p2p_client_manager.h
+│   │   ├── p2p_client_meta.h
+│   │   ├── p2p_master_service.h
+│   │   ├── p2p_rpc_service.h
+│   │   └── p2p_segment_manager.h
+│   └── client/
+│       ├── async_memcpy_executor.h
+│       ├── async_metadata_notifier.h
+│       ├── client_config_builder.h
+│       ├── client_rpc_service.h
+│       ├── client_rpc_types.h
+│       ├── data_manager.h
+│       ├── ha_recovery_manager.h
+│       ├── p2p_client_service.h
+│       ├── p2p_master_client.h
+│       ├── peer_client.h
+│       ├── route_cache.h
+│       ├── task_handle.h
+│       └── tiered_cache/          # 含 scheduler/、tiers/ 子目录
+│
+└── src/p2p/
+    ├── master/
+    │   ├── client_manager.cpp
+    │   ├── client_meta.cpp
+    │   ├── p2p_client_manager.cpp
+    │   ├── p2p_client_meta.cpp
+    │   ├── p2p_master_service.cpp
+    │   ├── p2p_rpc_service.cpp
+    │   └── p2p_segment_manager.cpp
+    └── client/
+        ├── async_memcpy_executor.cpp
+        ├── async_metadata_notifier.cpp
+        ├── client_rpc_service.cpp
+        ├── data_manager.cpp
+        ├── ha_recovery_manager.cpp
+        ├── p2p_client_service.cpp
+        ├── p2p_master_client.cpp
+        ├── peer_client.cpp
+        ├── route_cache.cpp
+        └── tiered_cache/          # 含 scheduler/、tiers/ 子目录
+```
+
+### 分类标准
+
+按代码**运行在哪个节点上**分类：
+
+| 分类 | 文件数 | 说明 |
+|------|--------|------|
+| **master/** | 7 头 + 7 cpp | 运行在 master 节点：管理客户端注册/心跳、segment 挂载/卸载、副本分配、密钥操作。`client_manager`/`client_meta` 虽名字带 client，但是 master 侧管理已连接客户端的数据结构，归入 master。 |
+| **client/** | 12 头 + 9 cpp | 运行在 client 节点：连接 master、buffer 注册、数据传输、tiered cache、HA 恢复、peer-to-peer RPC。 |
+| **p2p/ (共享)** | 3 头 | 被 master 和 client 共同引用：`heartbeat_type.h`、`p2p_rpc_types.h`、`p2p_types.h`。 |
+
+### 配套修改
+
+1. **CMakeLists.txt**（`mooncake-store/CMakeLists.txt`）：`include_directories` 新增 `include/p2p/master/` 和 `include/p2p/client/`。
+2. **CMakeLists.txt**（`mooncake-store/src/CMakeLists.txt`）：`MOONCAKE_STORE_SOURCES` 中 p2p 源文件路径从 `p2p/xxx.cpp` 改为 `p2p/master/xxx.cpp` 或 `p2p/client/xxx.cpp`。
+3. **`#include` 路径**：无需修改。所有 p2p 内部 include 使用相对路径（如 `#include "client_manager.h"`），CMake 新增的 include 目录使其自动解析。
+
+### 统计
+
+| 目录 | 头文件 | 源文件 | 合计 |
+|------|--------|--------|------|
+| `include/p2p/` (共享) | 3 | 0 | 3 |
+| `include/p2p/master/` | 7 | — | 7 |
+| `include/p2p/client/` | 12 | — | 12 |
+| `src/p2p/master/` | — | 7 | 7 |
+| `src/p2p/client/` | — | 9 | 9 |
+| **总计** | **22** | **16** | **38** |
