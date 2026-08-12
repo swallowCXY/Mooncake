@@ -6,11 +6,9 @@
 #include <sys/stat.h>  // For S_IRUSR, S_IWUSR
 #include <fcntl.h>     // For O_CREAT, O_RDWR
 #include <unistd.h>    // For ftruncate, close, shm_unlink
-#include <cstdlib>
 
 #include "real_client.h"
 #include "dummy_client.h"
-#include "utils.h"
 #include "utils/scoped_vlog_timer.h"
 #include "rpc_types.h"
 #include "types.h"
@@ -33,10 +31,7 @@ ShmHelper* ShmHelper::getInstance() {
     return &instance;
 }
 
-ShmHelper::ShmHelper() {
-    const char* hp = std::getenv("MC_STORE_USE_HUGEPAGE");
-    use_hugepage_ = (hp != nullptr);
-}
+ShmHelper::ShmHelper() {}
 
 ShmHelper::~ShmHelper() { cleanup(); }
 
@@ -64,20 +59,10 @@ bool ShmHelper::cleanup() {
 void* ShmHelper::allocate(size_t size) {
     std::lock_guard<std::mutex> lock(shm_mutex_);
 
-    unsigned int flags = MFD_CLOEXEC;
-    if (use_hugepage_) {
-        bool use_memfd = true;
-        size = align_up(size, get_hugepage_size_from_env(&flags, use_memfd));
-        LOG(INFO) << "Using huge pages for shared memory, size: " << size;
-    }
-
     // Create memfd
-    int fd = memfd_create_wrapper(MOONCAKE_SHM_NAME, flags);
+    int fd = memfd_create_wrapper(MOONCAKE_SHM_NAME, MFD_CLOEXEC);
     if (fd == -1) {
-        std::string extra_msg =
-            use_hugepage_ ? " (Check /proc/sys/vm/nr_hugepages?)" : "";
-        throw std::runtime_error("Failed to create anonymous shared memory" +
-                                 extra_msg + ": " +
+        throw std::runtime_error("Failed to create anonymous shared memory: " +
                                  std::string(strerror(errno)));
     }
 
@@ -89,8 +74,8 @@ void* ShmHelper::allocate(size_t size) {
     }
 
     // Map memory
-    void* base_addr = mmap(nullptr, size, PROT_READ | PROT_WRITE,
-                           MAP_SHARED | MAP_POPULATE, fd, 0);
+    void* base_addr =
+        mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (base_addr == MAP_FAILED) {
         close(fd);
         throw std::runtime_error("Failed to map shared memory: " +
@@ -277,11 +262,13 @@ ErrorCode DummyClient::connect(const std::string& server_address) {
     auto pool = client_accessor_.GetClientPool();
     // The client pool does not have native connection check method, so we need
     // to use custom ServiceReady API.
-    auto result = invoke_rpc<&RealClient::service_ready_internal, void>();
+    auto result =
+        invoke_rpc<&RealClient::service_ready_internal, DeploymentMode>();
     if (!result.has_value()) {
         timer.LogResponse("error_code=", result.error());
         return result.error();
     }
+    deployment_mode_ = result.value();
     timer.LogResponse("error_code=", ErrorCode::OK);
     connected_ = true;
     return ErrorCode::OK;
@@ -356,11 +343,9 @@ int DummyClient::register_shm_via_ipc(const ShmHelper::ShmSegment* shm,
     return 0;
 }
 
-int DummyClient::setup_dummy(size_t mem_pool_size, size_t local_buffer_size,
-                             const std::string& server_address,
-                             const std::string& ipc_socket_path) {
+int DummyClient::setup(DummyClientConfig& config) {
     void* base_addr = nullptr;
-    ErrorCode err = connect(server_address);
+    ErrorCode err = connect(config.real_client_addr);
     if (err != ErrorCode::OK) {
         LOG(ERROR) << "Failed to connect to real client";
         return -1;
@@ -368,13 +353,13 @@ int DummyClient::setup_dummy(size_t mem_pool_size, size_t local_buffer_size,
 
     shm_helper_ = ShmHelper::getInstance();
     try {
-        base_addr = shm_helper_->allocate(local_buffer_size);
+        base_addr = shm_helper_->allocate(config.local_buffer_size);
     } catch (const std::exception& e) {
         LOG(ERROR) << "Failed to allocate shared memory: " << e.what();
         return -1;
     }
 
-    ipc_socket_path_ = ipc_socket_path;
+    ipc_socket_path_ = config.ipc_socket_path;
 
     // Attempt registration for the primary segment
     auto local_buffer_shm = shm_helper_->get_shm(base_addr);
@@ -428,17 +413,14 @@ int DummyClient::register_buffer(void* buffer, size_t size) {
         LOG(ERROR) << "Buffer is not in any registered shared memory";
         return -1;
     }
-    if (shm_helper_->is_hugepage()) {
-        size = align_up(size, get_hugepage_size_from_env());
-    }
     // Check bounds
     if (reinterpret_cast<uint8_t*>(buffer) !=
             reinterpret_cast<uint8_t*>(shm->base_addr) ||
         size != shm->size) {
-        LOG(ERROR) << "Invalid buffer address or size for registration: "
-                      "Buffer addr: "
-                   << buffer << ", need addr: " << shm->base_addr
-                   << ", buffer size: " << size << ", need size: " << shm->size;
+        LOG(ERROR)
+            << "Invalid buffer address or size for registration: Buffer addr: "
+            << buffer << ", need addr: " << shm->base_addr
+            << ", buffer size: " << size << ", need size: " << shm->size;
         return -1;
     }
 
@@ -493,21 +475,21 @@ uint64_t DummyClient::alloc_from_mem_pool(size_t size) {
 }
 
 int DummyClient::put(const std::string& key, std::span<const char> value,
-                     const ReplicateConfig& config) {
+                     const WriteConfig& config) {
     return to_py_ret(invoke_rpc<&RealClient::put_dummy_helper, void>(
         key, value, config, client_id_));
 }
 
 int DummyClient::put_batch(const std::vector<std::string>& keys,
                            const std::vector<std::span<const char>>& values,
-                           const ReplicateConfig& config) {
+                           const WriteConfig& config) {
     return to_py_ret(invoke_rpc<&RealClient::put_batch_dummy_helper, void>(
         keys, values, config, client_id_));
 }
 
 int DummyClient::put_parts(const std::string& key,
                            std::vector<std::span<const char>> values,
-                           const ReplicateConfig& config) {
+                           const WriteConfig& config) {
     return to_py_ret(invoke_rpc<&RealClient::put_parts_dummy_helper, void>(
         key, values, config, client_id_));
 }
@@ -559,15 +541,17 @@ int64_t DummyClient::getSize(const std::string& key) {
     return to_py_ret(invoke_rpc<&RealClient::getSize_internal, int64_t>(key));
 }
 
-std::shared_ptr<BufferHandle> DummyClient::get_buffer(const std::string& key) {
+std::shared_ptr<BufferHandle> DummyClient::get_buffer(
+    const std::string& key, const ReadRouteConfig& config) {
     // Dummy client does not use BufferHandle, so we return nullptr
     return nullptr;
 }
 
 std::tuple<uint64_t, size_t> DummyClient::get_buffer_info(
-    const std::string& key) {
-    auto result = invoke_rpc<&RealClient::get_buffer_info_dummy_helper,
-                             std::tuple<uint64_t, size_t>>(key, client_id_);
+    const std::string& key, const ReadRouteConfig& config) {
+    auto result =
+        invoke_rpc<&RealClient::get_buffer_info_dummy_helper,
+                   std::tuple<uint64_t, size_t>>(key, config, client_id_);
     if (!result.has_value()) {
         LOG(ERROR) << "Get buffer failed: " << toString(result.error());
         return std::make_tuple(0, 0);
@@ -576,13 +560,13 @@ std::tuple<uint64_t, size_t> DummyClient::get_buffer_info(
 }
 
 std::vector<std::shared_ptr<BufferHandle>> DummyClient::batch_get_buffer(
-    const std::vector<std::string>& keys) {
+    const std::vector<std::string>& keys, const ReadRouteConfig& config) {
     // TODO: implement this function
     return std::vector<std::shared_ptr<BufferHandle>>();
 }
 
-int64_t DummyClient::get_into(const std::string& key, void* buffer,
-                              size_t size) {
+int64_t DummyClient::get_into(const std::string& key, void* buffer, size_t size,
+                              const ReadRouteConfig& config) {
     // TODO: implement this function
     return -1;
 }
@@ -594,7 +578,7 @@ std::string DummyClient::get_hostname() const {
 
 std::vector<int> DummyClient::batch_put_from(
     const std::vector<std::string>& keys, const std::vector<void*>& buffer_ptrs,
-    const std::vector<size_t>& sizes, const ReplicateConfig& config) {
+    const std::vector<size_t>& sizes, const WriteConfig& config) {
     std::vector<uint64_t> buffers;
     for (auto ptr : buffer_ptrs) {
         buffers.push_back(reinterpret_cast<uint64_t>(ptr));
@@ -613,21 +597,21 @@ std::vector<int> DummyClient::batch_put_from(
 }
 
 int DummyClient::put_from(const std::string& key, void* buffer, size_t size,
-                          const ReplicateConfig& config) {
+                          const WriteConfig& config) {
     // TODO: implement this function
     return -1;
 }
 
 std::vector<int64_t> DummyClient::batch_get_into(
     const std::vector<std::string>& keys, const std::vector<void*>& buffer_ptrs,
-    const std::vector<size_t>& sizes) {
+    const std::vector<size_t>& sizes, const ReadRouteConfig& config) {
     std::vector<uint64_t> buffers;
     for (auto ptr : buffer_ptrs) {
         buffers.push_back(reinterpret_cast<uint64_t>(ptr));
     }
     auto internal_results =
         invoke_batch_rpc<&RealClient::batch_get_into_dummy_helper, int64_t>(
-            keys.size(), keys, buffers, sizes, client_id_);
+            keys.size(), keys, buffers, sizes, config, client_id_);
     std::vector<int64_t> results;
     results.reserve(internal_results.size());
 
@@ -641,7 +625,7 @@ std::vector<int64_t> DummyClient::batch_get_into(
 int DummyClient::put_from_with_metadata(const std::string& key, void* buffer,
                                         void* metadata_buffer, size_t size,
                                         size_t metadata_size,
-                                        const ReplicateConfig& config) {
+                                        const WriteConfig& config) {
     // TODO: implement this function
     return -1;
 }
@@ -650,7 +634,7 @@ std::vector<int> DummyClient::batch_put_from_multi_buffers(
     const std::vector<std::string>& keys,
     const std::vector<std::vector<void*>>& all_buffer_ptrs,
     const std::vector<std::vector<size_t>>& all_sizes,
-    const ReplicateConfig& config) {
+    const WriteConfig& config) {
     // TODO: implement this function
     std::vector<int> vec(keys.size(), -1);
     return vec;
@@ -660,7 +644,7 @@ std::vector<int> DummyClient::batch_get_into_multi_buffers(
     const std::vector<std::string>& keys,
     const std::vector<std::vector<void*>>& all_buffer_ptrs,
     const std::vector<std::vector<size_t>>& all_sizes,
-    bool prefer_alloc_in_same_node) {
+    bool aggregate_same_segment_task, const ReadRouteConfig& config) {
     // TODO: implement this function
     std::vector<int> vec(keys.size(), -1);
     return vec;
@@ -707,10 +691,10 @@ void DummyClient::ping_thread_main() {
 
     while (ping_running_) {
         auto ping_result =
-            invoke_rpc<&RealClient::ping, PingResponse>(client_id_);
+            invoke_rpc<&RealClient::ping, HeartbeatResponse>(client_id_);
 
         if (ping_result.has_value() &&
-            ping_result.value().client_status == ClientStatus::OK) {
+            ping_result.value().status == ClientStatus::HEALTH) {
             ping_fail_count = 0;
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(success_ping_interval_ms));
@@ -752,7 +736,8 @@ void DummyClient::ping_thread_main() {
                     // Even if register_shm_via_ipc succeeded, we should check
                     // if RPC is responsive
                     auto check_rpc =
-                        invoke_rpc<&RealClient::ping, PingResponse>(client_id_);
+                        invoke_rpc<&RealClient::ping, HeartbeatResponse>(
+                            client_id_);
                     if (check_rpc.has_value()) {
                         LOG(INFO) << "RPC connection restored";
                         ping_fail_count = 0;

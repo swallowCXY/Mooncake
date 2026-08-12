@@ -16,6 +16,7 @@
 #include <ylt/coro_io/client_pool.hpp>
 
 #include "client_metric.h"
+#include "master_client_interface.h"
 #include "master_metric_manager.h"
 #include "mutex.h"
 #include "p2p_rpc_types.h"
@@ -35,9 +36,10 @@ static const std::string kP2PDefaultMasterAddress = "localhost:50051";
  *
  * Flattened from p2p-branch MasterClient (base) + P2PMasterClient (subclass).
  * No base class, no virtual methods. The central master client (MasterClient
- * in master_client.h) is untouched and independent.
+ * in master_client.h) is untouched and independent. Implements
+ * MasterClientInterface so the ClientService base can talk to it uniformly.
  */
-class P2PMasterClient {
+class P2PMasterClient : public MasterClientInterface {
    public:
     P2PMasterClient(const UUID& client_id, MasterClientMetric* metrics = nullptr)
         : client_id_(client_id), metrics_(metrics) {
@@ -62,7 +64,7 @@ class P2PMasterClient {
      * @brief Connects to the master service
      */
     [[nodiscard]] ErrorCode Connect(
-        const std::string& master_addr = kP2PDefaultMasterAddress);
+        const std::string& master_addr = kP2PDefaultMasterAddress) override;
 
     [[nodiscard]] tl::expected<bool, ErrorCode> ExistKey(
         const std::string& object_key);
@@ -83,15 +85,15 @@ class P2PMasterClient {
                             GetReplicaListRequestConfig());
     [[nodiscard]] tl::expected<MasterMetricManager::CacheHitStatDict,
                                ErrorCode>
-    CalcCacheStats();
+    CalcCacheStats() override;
     [[nodiscard]] tl::expected<
         std::unordered_map<UUID, std::vector<std::string>, boost::hash<UUID>>,
         ErrorCode>
-    BatchQueryIp(const std::vector<UUID>& client_ids);
+    BatchQueryIp(const std::vector<UUID>& client_ids) override;
     [[nodiscard]] tl::expected<
         std::unordered_map<std::string, std::vector<Replica::Descriptor>>,
         ErrorCode>
-    GetReplicaListByRegex(const std::string& str);
+    GetReplicaListByRegex(const std::string& str) override;
     [[nodiscard]] tl::expected<void, ErrorCode> Remove(const std::string& key);
     [[nodiscard]] tl::expected<long, ErrorCode> RemoveByRegex(
         const std::string& str);

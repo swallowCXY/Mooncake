@@ -366,6 +366,71 @@ main 缺 p2p 管理层文件，是因为 **p2p 分支重构了 segment/client/�
 
 ---
 
+## 9. 路径 X-revised（保留 p2p client 架构 + 抽心跳 + 对接 main）
+
+> 架构师最终决定：client service 保留 p2p 重构架构（ClientService 基类 + CentralizedClientService + P2PClientService 子类），把基类依赖的 p2p RPC 心跳逻辑抽到 P2PClientService，CentralizedClientService 对接 main 的 Ping master。RealClient 也换 p2p config-templated 版（反转 C8-Y），Python API 变化（已接受）。
+
+### 决定性冲突与解决（执行前已核实）
+1. **RegisterClient p2p RPC**（main master 无）：CentralizedClientService::RegisterClient 改 Ping+MountSegment（不调 master RegisterClient RPC）。
+2. **task 方法 + task_manager.h**（main 无）：CentralizedMasterClient 删 task 方法 + include（已确认 CentralizedClientService 不调用，死代码）。
+3. **GetMasterClient 返回类型 + MasterClient 同名**：引入 `MasterClientInterface`（4 方法：Connect/BatchQueryIp/GetReplicaListByRegex/CalcCacheStats）；基类 `GetMasterClient()` 返回 `MasterClientInterface&`；P2PMasterClient(C6 扁平)加继承；CentralizedMasterClient 组合包装 main MasterClient。**不恢复 p2p MasterClient 基类，不反转 C6**。
+4. **CentralizedMasterClient RPC 目标**：纯委托 main MasterClient（invoke_rpc 已绑 main `&WrappedMasterService::*`），无需改指针。
+5. **QueryResult lease**：main `Client::Get(key,QueryResult,slices)` 在 `:606` 调 `query_result.IsLeaseExpired()` → **lease 硬依赖**。p2p 基类 QueryResult 加 `lease_timeout` 字段（P2P 填 `time_point::max()`，Central 填 master lease）。
+6. **Ping 线程移植**：CentralizedClientService 移植 main `Client::PingThreadMain`。
+7. **view_version_/HA etcd**：移到 P2PClientService；Centralized 不做 HA view。
+
+### 已执行：S1-S3
+- **S1** `include/p2p/master_client_interface.h`（新建）：4 纯虚方法。
+- **S2** `include/p2p/p2p_master_client.h`：`P2PMasterClient : public MasterClientInterface`，4 方法加 `override`（C6 扁平不反转）。
+- **S3** `include/p2p/client_service.h` + `src/p2p/client_service.cpp`（p2p 分支迁入 + 抽心跳）：
+  - 移除心跳逻辑（StartHeartbeat/HeartbeatThreadMain/HandleHeartbeatResponse/HandleHeartbeatTaskResult/ReconnectToMaster/WaitForNextHeartbeat/build_heartbeat_request）→ 纯虚 `StartKeepalive`/`StopHeartbeat`（子类实现）。
+  - `GetMasterClient()` → `virtual MasterClientInterface& = 0`。
+  - `ConnectToMaster` 去 etcd HA 分支（仅 `GetMasterClient().Connect`）。
+  - 移除心跳成员（master_view_helper_/heartbeat_*/view_version_/connection_interrupted_）。
+  - `QueryResult` 加 `lease_timeout` + `IsLeaseExpired()`（保 main Get 语义）。
+  - 删 `#include "master_client.h"`（避免与 main 同名冲突），改 `master_client_interface.h`。
+  - `GetViewVersion()` 改 virtual 默认返回 0。
+- 验证：`public MasterClientInterface` ✓、`MasterClientInterface& GetMasterClient` ✓、`StartKeepalive=0` ✓、cpp 无心跳 impl ✓、QueryResult lease 7 处 ✓、无 master_client.h include ✓。
+
+### 已执行：S4-S9（完成）
+- **S4** `include/p2p/centralized_master_client.h`（新建，header-only 组合包装）：`: public MasterClientInterface`，持 `shared_ptr<mooncake::MasterClient>`（main 的），全方法委托。删 task 方法 + task_manager.h include。`GetReplicaList`/`BatchGetReplicaList` 接受 `ReadRouteConfig` 但丢弃（main master 不用 route config）。暴露 `Ping()` 供 CentralizedClientService Ping 线程用。
+- **S5** `include/p2p/centralized_client_service.h` + `src/p2p/centralized_client_service.cpp`（p2p 分支迁入 + 改）：
+  - `GetMasterClient()` 返回 `MasterClientInterface&`（协变 CentralizedMasterClient）。
+  - `RegisterClient()` **改 Ping+返回 view_version**（不调 master RegisterClient RPC；main master 无此 RPC）。
+  - 加 `StartKeepalive`/`StopHeartbeat`/`PingThreadMain`（移植 main Client 的 Ping 线程逻辑，调 `master_client_.Ping()`）。
+  - 删 `build_heartbeat_request()` override。
+  - `Query`/`BatchQuery` 的 `centralized_extra->lease_ttl_ms` 改为 main flat `lease_ttl_ms`（GetReplicaListResponse 是 main 版）。
+  - 加 `ping_thread_`/`ping_running_` 成员。
+- **S6** `include/p2p/p2p_client_service.h` + `src/p2p/p2p_client_service.cpp`（替换 C8-partial 扁平版为子类）：
+  - `: public ClientService`（子类恢复）。
+  - `GetMasterClient()` 返回 `MasterClientInterface&`（协变 P2PMasterClient）。
+  - 心跳逻辑从基类移入：`StartKeepalive`/`StopHeartbeat`/`HeartbeatThreadMain`/`HandleHeartbeatResponse`/`HandleHeartbeatTaskResult`/`ReconnectToMaster`/`WaitForNextHeartbeat`/`build_heartbeat_request`。
+  - 恢复 `master_view_helper_`/`heartbeat_*/view_version_/connection_interrupted_` 成员。
+  - `HeartbeatThreadMain` 调 `master_client_.Heartbeat(req)`（直接调，不经接口）。
+  - 删 `P2PQueryResult`（统一 p2p `QueryResult`，带 lease）。
+- **S7** RealClient/pyclient/store_py/real_client_main/dummy_client 全换 p2p 版（反转 C8-Y）：从 p2p 分支复制替换。
+- **S8** 删 main 孤儿：`include/client_service.h`(`Client`) + `src/client_service.cpp`。保留 `master_client.h/.cpp`（CentralizedMasterClient 包装它）。
+- **S9** CMake：`MOONCAKE_STORE_SOURCES` 用扁平 `p2p/` 路径（非 `p2p/master/`+`p2p/client/` 子目录）；加 `p2p/client_service.cpp`+`p2p/centralized_client_service.cpp`+`p2p/p2p_client_service.cpp`；删 stale `p2p/master/`+`p2p/client/` 子目录。
+
+**验证（grep）**：
+- `public ClientService` 在 p2p_client_service.h ✓（子类恢复）
+- `MasterClientInterface& GetMasterClient` 在 centralized + p2p client service ✓
+- `PingThreadMain`/`StartKeepalive` in centralized ✓
+- `master_client_.Ping()` in RegisterClient ✓（不调 RegisterClient RPC）
+- main `client_service.h` 删除 ✓；`master_client.h/.cpp` 保留 ✓
+- CMake 有 `centralized_client_service` + `client_service` + `p2p_client_service` ✓
+- p2p 目录 27 cpp + 39 headers ✓
+
+**风险项（待 Linux 编译验证）**：
+1. **transfer_engine API 漂移**：CentralizedClientService(1938)+P2PClientService(1618)+RealClient(1710) 重度依赖 → 编译期修。
+2. **GetReplicaListResponse 类型**：CentralizedClientService 用 main 版（flat lease_ttl_ms），已改 ✓。P2PClientService 用 p2p 版（无 centralized_extra）—— 但 p2p_rpc_types.h 已删 GetReplicaListResponse（复用 main），p2p master 返回的也是 main 版。需编译验证 P2P Query 路径。
+3. **RealClient/pyclient/store_py 全换**：Python API 变化（WriteConfig/ReadRouteConfig/setup_p2p_real_client，删 setup_real/pub_tensor_with_tp 等）—— 已接受。
+4. **main master_client.h 同名**：CentralizedMasterClient include main `master_client.h`；p2p 路径无 p2p `master_client.h`（已删）→ 无冲突 ✓。
+5. **CentralizedQueryResult lease**：继承 p2p QueryResult（带 lease_timeout），构造调 `QueryResult(replicas, lease)` ✓。
+6. **store_py 跨模块**：mooncake-integration 需 include `include/p2p/` 路径 ✓（CMake 已加）。
+
+---
+
 ## 9. Linux 编译验证与修复记录 (2026-08-03 ~ 2026-08-04)
 
 > 环境：`vllm18-mooncake` 容器 (vllm/vllm-openai:v0.18.0-aarch64, Ubuntu 22.04, CUDA 12.9, Python 3.12)
