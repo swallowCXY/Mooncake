@@ -25,33 +25,33 @@ set(MOONCAKE_STORE_SOURCES
     http_metadata_server.cpp
     file_storage.cpp
     # P2P deployment mode (master side)
-    p2p/p2p_master_service.cpp
-    p2p/p2p_master_client.cpp
-    p2p/p2p_rpc_service.cpp
-    p2p/p2p_client_manager.cpp
-    p2p/p2p_client_meta.cpp
-    p2p/p2p_segment_manager.cpp
-    p2p/client_manager.cpp
-    p2p/client_meta.cpp
+    p2p/master/p2p_master_service.cpp
+    p2p/master/p2p_rpc_service.cpp
+    p2p/master/p2p_client_manager.cpp
+    p2p/master/p2p_client_meta.cpp
+    p2p/master/p2p_segment_manager.cpp
+    p2p/master/client_manager.cpp
+    p2p/master/client_meta.cpp
     # P2P deployment mode (client side)
-    p2p/client_service.cpp
-    p2p/centralized_client_service.cpp
-    p2p/p2p_client_service.cpp
-    p2p/peer_client.cpp
-    p2p/client_rpc_service.cpp
-    p2p/route_cache.cpp
-    p2p/async_metadata_notifier.cpp
-    p2p/ha_recovery_manager.cpp
-    p2p/async_memcpy_executor.cpp
-    p2p/data_manager.cpp
-    p2p/tiered_cache/copier_registry.cpp
-    p2p/tiered_cache/data_copier.cpp
-    p2p/tiered_cache/tiered_backend.cpp
-    p2p/tiered_cache/tiers/dram_tier.cpp
-    p2p/tiered_cache/tiers/storage_tier.cpp
-    p2p/tiered_cache/scheduler/simple_policy.cpp
-    p2p/tiered_cache/scheduler/lru_policy.cpp
-    p2p/tiered_cache/scheduler/client_scheduler.cpp
+    p2p/client/p2p_master_client.cpp
+    p2p/client/client_service.cpp
+    p2p/client/centralized_client_service.cpp
+    p2p/client/p2p_client_service.cpp
+    p2p/client/peer_client.cpp
+    p2p/client/client_rpc_service.cpp
+    p2p/client/route_cache.cpp
+    p2p/client/async_metadata_notifier.cpp
+    p2p/client/ha_recovery_manager.cpp
+    p2p/client/async_memcpy_executor.cpp
+    p2p/client/data_manager.cpp
+    p2p/client/tiered_cache/copier_registry.cpp
+    p2p/client/tiered_cache/data_copier.cpp
+    p2p/client/tiered_cache/tiered_backend.cpp
+    p2p/client/tiered_cache/tiers/dram_tier.cpp
+    p2p/client/tiered_cache/tiers/storage_tier.cpp
+    p2p/client/tiered_cache/scheduler/simple_policy.cpp
+    p2p/client/tiered_cache/scheduler/lru_policy.cpp
+    p2p/client/tiered_cache/scheduler/client_scheduler.cpp
 )
 
 set(EXTRA_LIBS "")

@@ -602,9 +602,67 @@ mooncake-store/
 
 | 目录 | 头文件 | 源文件 | 合计 |
 |------|--------|--------|------|
-| `include/p2p/` (共享) | 3 | 0 | 3 |
-| `include/p2p/master/` | 7 | — | 7 |
-| `include/p2p/client/` | 12 | — | 12 |
+| `include/p2p/` (共享) | 4 | 0 | 4 |
+| `include/p2p/master/` | 8 | — | 8 |
+| `include/p2p/client/` | 15 | — | 15 |
 | `src/p2p/master/` | — | 7 | 7 |
-| `src/p2p/client/` | — | 9 | 9 |
-| **总计** | **22** | **16** | **38** |
+| `src/p2p/client/` | — | 11 (+ tiered_cache/) | 11 |
+| **总计** | **27** | **18** | **45** |
+
+> 注：`master_client_interface.h`（用户新增）归入共享层。`centralized_master_client.h` 归入 master/，`centralized_client_service.h`/`client_service.h` 归入 client/。
+
+---
+
+## 11. 编译修复记录 (2026-08-13)
+
+> 环境：`vllm18-mooncake` 容器 (vllm-ascend:kv-pool-layerwise-main-54503ece-a2, Ubuntu 22.04, GCC 11.4, cmake 4.4)
+> 构建命令：`cmake .. -DCMAKE_BUILD_TYPE=Release -DUSE_ASCEND_DIRECT=ON -DBUILD_UNIT_TESTS=OFF`
+> 编译目标：`mooncake_store`
+
+### 11.1 Client → ClientService 重命名适配
+
+| 文件 | 修改 |
+|------|------|
+| `include/file_storage.h` | `shared_ptr<Client>` → `shared_ptr<ClientService>` |
+| `src/file_storage.cpp` | `shared_ptr<Client>` → `shared_ptr<ClientService>`，`value().replicas` → `value()->replicas` |
+
+### 11.2 P2PClientStatus 类型适配
+
+| 文件 | 修改 |
+|------|------|
+| `src/real_client.cpp` | `ClientStatus client_status` → `P2PClientStatus client_status`，`ClientStatus::HEALTH` → `P2PClientStatus::HEALTH` |
+| `src/dummy_client.cpp` | `ClientStatus::HEALTH` → `P2PClientStatus::HEALTH` |
+
+### 11.3 ClientService 缺失方法 stub
+
+`include/p2p/client/client_service.h` 新增方法：
+
+| 方法 | 原因 |
+|------|------|
+| `MountLocalDiskSegment(bool)` | 旧 `Client` 类方法，`file_storage.cpp` 依赖 |
+| `NotifyOffloadSuccess(...)` | 同上 |
+| `BatchPutOffloadObject(...)` | 同上 |
+| `OffloadObjectHeartbeat(...)` | 同上 |
+
+### 11.4 centralized_master_client.h get_client_id 修复
+
+`MasterClient` 无 `get_client_id()` 方法（`client_id_` 为 private），`centralized_master_client.h` 改用 `UUID{0, 0}` 占位。
+
+### 11.5 centralized_client_service.cpp Segment API 适配
+
+| 行号 | 修改前 | 修改后 |
+|------|--------|--------|
+| 57, 1679 | `segment.IsCentralizedSegment()` | `segment.IsP2PSegment()` 取反 |
+| 62, 1684, 1705 | `segment.GetCentralizedExtra().base` | `segment.base`（平铺字段） |
+| 1617 | `auto& extra = mtseg.GetCentralizedExtra()` | `auto& extra = mtseg.GetP2PExtra()` |
+| 1618 | `extra.base` | `mtseg.base`（Segment 平铺字段） |
+| 1623 | `extra.base` | `mtseg.base` |
+| 1644 | `CentralizedSegmentExtraData extra` | `P2PSegmentExtraData extra` |
+| 1645 | `extra.base = ...` | `segment.base = ...` |
+| 1647 | `extra.te_endpoint = ...` | `segment.te_endpoint = ...` |
+| 1648 | `segment.extra = extra` | `segment.p2p_extra = extra` |
+| 543, 615 | `BuildSlicesFromBuffers(...)` | 新增辅助函数实现 |
+
+### 11.6 编译结果
+
+`mooncake_store` 目标编译通过，0 错误。

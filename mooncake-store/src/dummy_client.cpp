@@ -694,7 +694,7 @@ void DummyClient::ping_thread_main() {
             invoke_rpc<&RealClient::ping, HeartbeatResponse>(client_id_);
 
         if (ping_result.has_value() &&
-            ping_result.value().status == ClientStatus::HEALTH) {
+            ping_result.value().status == P2PClientStatus::HEALTH) {
             ping_fail_count = 0;
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(success_ping_interval_ms));

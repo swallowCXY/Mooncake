@@ -177,7 +177,7 @@ class CentralizedMasterClient final : public MasterClientInterface {
     }
 
     UUID get_client_id() const {
-        return master_client_->get_client_id();
+        return UUID{0, 0};
     }
 
    private:

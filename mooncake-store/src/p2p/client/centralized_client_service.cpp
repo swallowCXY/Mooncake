@@ -19,6 +19,21 @@
 
 namespace mooncake {
 
+static std::vector<Slice> BuildSlicesFromBuffers(
+    const std::vector<void*>& buffers,
+    const std::vector<size_t>& sizes,
+    uint64_t total_size) {
+    std::vector<Slice> slices;
+    uint64_t remaining = total_size;
+    for (size_t i = 0; i < buffers.size() && remaining > 0; ++i) {
+        size_t chunk = std::min(static_cast<uint64_t>(sizes[i]), remaining);
+        slices.emplace_back(Slice{buffers[i], chunk});
+        remaining -= chunk;
+    }
+    return slices;
+}
+
+
 CentralizedClientService::CentralizedClientService(
     const std::string& local_ip, uint16_t te_port,
     const std::string& metadata_connstring, uint16_t metrics_port,
@@ -54,12 +69,13 @@ void CentralizedClientService::Destroy() {
     }
 
     for (auto& segment : segments_to_unmount) {
-        if (!segment.IsCentralizedSegment()) {
+        if (segment.IsP2PSegment()) { continue; } // P2P segments skip centralized unmount
+        if (false) {
             LOG(ERROR) << "Segment " << segment.id << " is not centralized";
             continue;
         }
         auto result = InnerUnmountSegment(
-            reinterpret_cast<void*>(segment.GetCentralizedExtra().base),
+            reinterpret_cast<void*>(segment.base),
             segment.size);
         if (!result) {
             LOG(ERROR) << "Failed to unmount segment: "
@@ -1595,16 +1611,16 @@ tl::expected<void, ErrorCode> CentralizedClientService::MountSegment(
     // Check if the segment overlaps with any existing segment
     for (auto& it : mounted_segments_) {
         auto& mtseg = it.second;
-        if (!mtseg.IsCentralizedSegment()) {
+        if (mtseg.IsP2PSegment()) { continue; } {
             continue;
         }
-        auto& extra = mtseg.GetCentralizedExtra();
-        uintptr_t l1 = extra.base;
+        auto& extra = mtseg.GetP2PExtra();
+        uintptr_t l1 = mtseg.base;
         uintptr_t r1 = reinterpret_cast<uintptr_t>(mtseg.size) + l1;
         uintptr_t l2 = reinterpret_cast<uintptr_t>(buffer);
         uintptr_t r2 = reinterpret_cast<uintptr_t>(size) + l2;
         if (std::max(l1, l2) < std::min(r1, r2)) {
-            LOG(ERROR) << "segment_overlaps base1=" << extra.base
+            LOG(ERROR) << "segment_overlaps base1=" << mtseg.base
                        << " size1=" << mtseg.size << " base2=" << buffer
                        << " size2=" << size;
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
@@ -1625,11 +1641,11 @@ tl::expected<void, ErrorCode> CentralizedClientService::MountSegment(
     segment.name = local_endpoint();
     segment.size = size;
 
-    CentralizedSegmentExtraData extra;
-    extra.base = reinterpret_cast<uintptr_t>(buffer);
+    P2PSegmentExtraData extra;
+    segment.base = reinterpret_cast<uintptr_t>(buffer);
 
-    extra.te_endpoint = get_te_endpoint();
-    segment.extra = extra;
+    segment.te_endpoint = get_te_endpoint();
+    segment.p2p_extra = extra;
 
     auto mount_result = master_client_.MountSegment(segment);
     if (!mount_result) {
@@ -1660,12 +1676,12 @@ tl::expected<void, ErrorCode> CentralizedClientService::InnerUnmountSegment(
 
     for (auto it = mounted_segments_.begin(); it != mounted_segments_.end();
          ++it) {
-        if (!it->second.IsCentralizedSegment()) {
+        if (it->second.IsP2PSegment()) { continue; } {
             LOG(ERROR) << "segment_not_found base=" << buffer
                        << " size=" << size;
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
         }
-        if (it->second.GetCentralizedExtra().base ==
+        if (it->second.base ==
                 reinterpret_cast<uintptr_t>(buffer) &&
             it->second.size == size) {
             segment = it;
@@ -1686,7 +1702,7 @@ tl::expected<void, ErrorCode> CentralizedClientService::InnerUnmountSegment(
     }
 
     int rc = transfer_engine_->unregisterLocalMemory(
-        reinterpret_cast<void*>(segment->second.GetCentralizedExtra().base));
+        reinterpret_cast<void*>(segment->second.base));
     if (rc != 0) {
         LOG(ERROR) << "Failed to unregister transfer buffer with transfer "
                       "engine ret is "

@@ -8,7 +8,7 @@ namespace mooncake {
 
 class FileStorage {
    public:
-    FileStorage(std::shared_ptr<Client> client,
+    FileStorage(std::shared_ptr<ClientService> client,
                 const std::string& local_rpc_addr,
                 const FileStorageConfig& config);
     ~FileStorage();
@@ -80,7 +80,7 @@ class FileStorage {
         const std::vector<std::string>& keys,
         const std::vector<int64_t>& sizes);
 
-    std::shared_ptr<Client> client_;
+    std::shared_ptr<ClientService> client_;
     std::string local_rpc_addr_;
     FileStorageConfig config_;
     std::shared_ptr<StorageBackendInterface> storage_backend_;

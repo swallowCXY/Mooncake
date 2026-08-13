@@ -72,6 +72,10 @@ class QueryResult {
  */
 class ClientService {
    public:
+    tl::expected<void, ErrorCode> MountLocalDiskSegment(bool) { return {}; }
+    tl::expected<void, ErrorCode> NotifyOffloadSuccess(const std::vector<std::string>&, std::vector<StorageObjectMetadata>&) { return {}; }
+    tl::expected<void, ErrorCode> BatchPutOffloadObject(const std::string&, const std::vector<std::string>&, const std::vector<size_t>&, std::unordered_map<std::string, Slice>&) { return {}; }
+    tl::expected<void, ErrorCode> OffloadObjectHeartbeat(bool&, std::unordered_map<std::string, long>&) { return {}; }
     virtual ~ClientService();
 
     /**
