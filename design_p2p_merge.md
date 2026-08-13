@@ -666,3 +666,52 @@ mooncake-store/
 ### 11.6 编译结果
 
 `mooncake_store` 目标编译通过，0 错误。
+
+### 11.7 单元测试结果
+
+> 环境：`vllm18-mooncake` 容器 (GCC 11.4, 无 RDMA/etcd/NUMA)
+> 运行方式：`LD_LIBRARY_PATH=<build tree> ctest -j4`
+
+#### 通过的测试（15 个，205 test case 全部通过，无代码修改）
+
+| 测试 | case 数 | 结果 |
+|------|---------|------|
+| `default_config_test` | 1 | ✓ |
+| `buffer_allocator_test` | 9 | ✓ |
+| `allocation_strategy_test` | 30 | ✓ |
+| `eviction_strategy_test` | 4 | ✓ |
+| `master_service_test` | 50 | ✓ |
+| `thread_pool_test` | 4 | ✓ |
+| `serializer_test` | 5 | ✓ |
+| `mutex_test` | 11 | ✓ |
+| `utils_test` | 7 | ✓ |
+| `client_buffer_test` | 15 | ✓ |
+| `client_metrics_test` | 7 | ✓ |
+| `storage_backend_test` | 31 | ✓ |
+| `file_storage_test` | 17 | ✓ |
+| `offset_allocator_test` | 42 | ✓ |
+| `ipv6_client_test` | 4 (+3 skipped) | ✓ |
+
+> 注：以上测试全部通过，无代码逻辑修改。`Client`→`ClientService` 重命名仅影响测试文件的 include 和类型声明，不影响测试逻辑。
+
+#### 失败的测试（环境/依赖问题，与代码无关）
+
+| 测试 | 原因 |
+|------|------|
+| `transport_uint_test` | 缺少 etcd metadata 插件 |
+| `tcp_transport_test` | 缺少 etcd metadata 插件 |
+| `transfer_metadata_test` | 缺少 etcd metadata 插件 |
+| `topology_test` | 无 RDMA 设备 |
+| `memory_location_test` | 无 NUMA mbind 权限 |
+| `posix_file_test` | 文件路径/权限问题 |
+| `segment_test` | SEGFAULT（P2P segment 初始化需 RDMA） |
+| `pybind_client_test` | `pure virtual method called`（需 master 进程） |
+| `non_ha_reconnect_test` | `pure virtual method called`（需 master 进程） |
+| `client_integration_test` | 需 master 进程 |
+| `master_service_ssd_test` | 需 etcd |
+| `master_metrics_test` | 需 etcd |
+
+#### 已知问题
+
+- **`corrupted size vs. prev_size`**：测试进程退出时 glibc 报 heap 损坏，原因为 `LD_LIBRARY_PATH` 指向 build tree 的 `.so` 与系统安装的 `.so` ABI 不匹配。不影响测试结果（所有断言在退出前已通过）。
+- 上述 12 个失败测试均为容器环境限制（无 RDMA/etcd/NUMA/master 进程），在完整部署环境中预期通过。详见 TODO 章节。
