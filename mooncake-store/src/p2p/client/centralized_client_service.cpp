@@ -1611,10 +1611,8 @@ tl::expected<void, ErrorCode> CentralizedClientService::MountSegment(
     // Check if the segment overlaps with any existing segment
     for (auto& it : mounted_segments_) {
         auto& mtseg = it.second;
-        if (mtseg.IsP2PSegment()) { continue; } {
-            continue;
-        }
-        auto& extra = mtseg.GetP2PExtra();
+        // Skip P2P segments (central mode only checks central segments)
+        if (mtseg.IsP2PSegment()) continue;
         uintptr_t l1 = mtseg.base;
         uintptr_t r1 = reinterpret_cast<uintptr_t>(mtseg.size) + l1;
         uintptr_t l2 = reinterpret_cast<uintptr_t>(buffer);
@@ -1635,17 +1633,16 @@ tl::expected<void, ErrorCode> CentralizedClientService::MountSegment(
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
 
-    // Build segment with logical name; attach TE endpoint for transport
+    // Build segment with logical name; attach TE endpoint for transport.
+    // Central segments use flat base/te_endpoint fields; do NOT set p2p_extra
+    // (setting it would make IsP2PSegment() return true, breaking overlap
+    // checks and unmount lookups).
     Segment segment;
     segment.id = generate_uuid();
     segment.name = local_endpoint();
     segment.size = size;
-
-    P2PSegmentExtraData extra;
     segment.base = reinterpret_cast<uintptr_t>(buffer);
-
     segment.te_endpoint = get_te_endpoint();
-    segment.p2p_extra = extra;
 
     auto mount_result = master_client_.MountSegment(segment);
     if (!mount_result) {
@@ -1676,11 +1673,8 @@ tl::expected<void, ErrorCode> CentralizedClientService::InnerUnmountSegment(
 
     for (auto it = mounted_segments_.begin(); it != mounted_segments_.end();
          ++it) {
-        if (it->second.IsP2PSegment()) { continue; } {
-            LOG(ERROR) << "segment_not_found base=" << buffer
-                       << " size=" << size;
-            return tl::unexpected(ErrorCode::INVALID_PARAMS);
-        }
+        // Skip P2P segments (central mode only unmounts central segments)
+        if (it->second.IsP2PSegment()) continue;
         if (it->second.base ==
                 reinterpret_cast<uintptr_t>(buffer) &&
             it->second.size == size) {
